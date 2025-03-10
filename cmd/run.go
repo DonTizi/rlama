@@ -32,6 +32,31 @@ Example: rlama run rag1`,
 			return err
 		}
 
+		// Check if using a small model
+		isSmallModel := false
+		
+		// Check if --small-model flag was used
+		if smallModelMode {
+			isSmallModel = true
+			fmt.Println("Small model optimizations enabled via flag")
+		} else {
+			// Auto-detect based on model name
+			modelSize, err := ollamaClient.GetModelSize(rag.ModelName)
+			if err == nil && modelSize <= 7 {
+				isSmallModel = true
+				fmt.Println("Small model detected automatically:", rag.ModelName)
+			}
+		}
+		
+		// Apply runtime optimizations for small models
+		if isSmallModel {
+			// Modify the MaxRetrievedChunks at runtime
+			rag.MaxRetrievedChunks = 5 // Instead of default 20
+			
+			// Could also modify other settings here
+			fmt.Printf("Optimizing for small model: retrieving max %d chunks\n", rag.MaxRetrievedChunks)
+		}
+
 		fmt.Printf("RAG '%s' loaded. Model: %s\n", rag.Name, rag.ModelName)
 		fmt.Println("Type your question (or 'exit' to quit):")
 

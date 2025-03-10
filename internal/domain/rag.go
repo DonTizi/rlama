@@ -16,6 +16,7 @@ type RagSystem struct {
 	VectorStore *vector.Store
 	Documents   []*Document     `json:"documents"`
 	Chunks      []*DocumentChunk `json:"chunks"`
+	MaxRetrievedChunks int // If > 0, limits number of chunks retrieved
 }
 
 // NewRagSystem crée une nouvelle instance de RagSystem

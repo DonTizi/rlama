@@ -35,6 +35,7 @@ var (
 	versionFlag bool
 	ollamaHost  string
 	ollamaPort  string
+	smallModelMode bool
 )
 
 // Execute executes the root command
@@ -54,6 +55,9 @@ func init() {
 	// Add Ollama configuration flags
 	rootCmd.PersistentFlags().StringVar(&ollamaHost, "host", "", "Ollama host (overrides OLLAMA_HOST env var, default: localhost)")
 	rootCmd.PersistentFlags().StringVar(&ollamaPort, "port", "", "Ollama port (overrides port in OLLAMA_HOST env var, default: 11434)")
+	
+	// Add small model mode flag
+	rootCmd.PersistentFlags().BoolVar(&smallModelMode, "small-model", false, "Enable optimizations for small models (<7B parameters)")
 	
 	// Override the Run function to handle the --version flag
 	rootCmd.Run = func(cmd *cobra.Command, args []string) {

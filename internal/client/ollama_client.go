@@ -7,6 +7,8 @@ import (
 	"io/ioutil"
 	"net/http"
 	"os"
+	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -18,8 +20,9 @@ const (
 
 // OllamaClient est un client pour l'API Ollama
 type OllamaClient struct {
-	BaseURL string
-	Client  *http.Client
+	BaseURL    string
+	Client     *http.Client
+	ModelSizes map[string]int // Cache for model sizes in billions of parameters
 }
 
 // EmbeddingRequest est la structure de la requête pour l'API /api/embeddings
@@ -95,8 +98,9 @@ func NewOllamaClient(host, port string) *OllamaClient {
 	baseURL := fmt.Sprintf("http://%s:%s", host, port)
 	
 	return &OllamaClient{
-		BaseURL: baseURL,
-		Client:  &http.Client{},
+		BaseURL:    baseURL,
+		Client:     &http.Client{},
+		ModelSizes: make(map[string]int), // Initialize the map
 	}
 }
 
@@ -217,4 +221,74 @@ func (c *OllamaClient) CheckOllamaAndModel(modelName string) error {
 	// This check could be added here
 	
 	return nil
+}
+
+// GetModelSize returns the size of the specified model in billions of parameters
+func (oc *OllamaClient) GetModelSize(modelName string) (int, error) {
+	// Check cache first
+	if size, exists := oc.ModelSizes[modelName]; exists {
+		return size, nil
+	}
+	
+	// Try to detect from model name using regex patterns
+	if size := detectSizeFromName(modelName); size > 0 {
+		oc.ModelSizes[modelName] = size
+		return size, nil
+	}
+	
+	// If we couldn't detect from name, make an educated guess
+	estimatedSize := estimateModelSize(modelName)
+	oc.ModelSizes[modelName] = estimatedSize
+	return estimatedSize, nil
+}
+
+// Helper function to detect size from model name
+func detectSizeFromName(name string) int {
+	// Common patterns:
+	// - llama-3b, llama-3-b, llama3b, llama3.2b, llama:3b
+	// - 3b, 3B in the name
+	patterns := []string{
+		`(\d+)b`,
+		`(\d+)[.-]b`,
+		`(\d+)B`,
+		`[:-](\d+)b`,
+		`[:-](\d+)B`,
+	}
+	
+	for _, pattern := range patterns {
+		re := regexp.MustCompile(pattern)
+		matches := re.FindStringSubmatch(name)
+		if len(matches) > 1 {
+			size, err := strconv.Atoi(matches[1])
+			if err == nil {
+				return size
+			}
+		}
+	}
+	
+	return 0 // Couldn't detect
+}
+
+// Estimate size based on model family
+func estimateModelSize(name string) int {
+	lowerName := strings.ToLower(name)
+	
+	// Check for common size indicators in the name
+	if strings.Contains(lowerName, "tiny") || 
+	   strings.Contains(lowerName, "mini") ||
+	   strings.Contains(lowerName, "3b") ||
+	   strings.Contains(lowerName, "3.2") {
+		return 3
+	} else if strings.Contains(lowerName, "7b") ||
+	          strings.Contains(lowerName, "small") {
+		return 7
+	} else if strings.Contains(lowerName, "13b") ||
+	          strings.Contains(lowerName, "medium") {
+		return 13
+	} else if strings.Contains(lowerName, "70b") ||
+	          strings.Contains(lowerName, "large") {
+		return 70
+	} else {
+		return 13 // Default to medium size if unknown
+	}
 } 

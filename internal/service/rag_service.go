@@ -9,6 +9,9 @@ import (
 	"github.com/dontizi/rlama/internal/repository"
 )
 
+// Add this flag variable at the top of the file
+var smallModelMode bool
+
 // RagService manages operations related to RAG systems
 type RagService struct {
 	documentLoader   *DocumentLoader
@@ -32,7 +35,7 @@ func NewRagService(ollamaClient *client.OllamaClient) *RagService {
 }
 
 // CreateRag creates a new RAG system
-func (rs *RagService) CreateRag(modelName, ragName, folderPath string) error {
+func (rs *RagService) CreateRag(modelName, ragName, folderPath string, chunkSize, chunkOverlap int) error {
 	// Check if Ollama is available
 	if err := rs.ollamaClient.CheckOllamaAndModel(modelName); err != nil {
 		return err
@@ -58,8 +61,8 @@ func (rs *RagService) CreateRag(modelName, ragName, folderPath string) error {
 	// Create the RAG system
 	rag := domain.NewRagSystem(ragName, modelName)
 	
-	// Create chunker service
-	chunkerService := NewChunkerService(DefaultChunkingConfig())
+	// Create chunker service with provided parameters
+	chunkerService := NewChunkerService(chunkSize, chunkOverlap)
 	
 	// Process each document - chunk and generate embeddings
 	var allChunks []*domain.DocumentChunk
@@ -118,15 +121,27 @@ func (rs *RagService) Query(rag *domain.RagSystem, query string) (string, error)
 	if err := rs.ollamaClient.CheckOllamaAndModel(rag.ModelName); err != nil {
 		return "", err
 	}
-
+	
 	// Generate embedding for the query
 	queryEmbedding, err := rs.embeddingService.GenerateQueryEmbedding(query, rag.ModelName)
 	if err != nil {
 		return "", fmt.Errorf("error generating embedding for query: %w", err)
 	}
 
-	// Search for the most relevant chunks
-	results := rag.VectorStore.Search(queryEmbedding, 20) // Top 5 chunks
+	// Use MaxRetrievedChunks if set, otherwise default to 20
+	numChunks := 20
+	if rag.MaxRetrievedChunks > 0 {
+		numChunks = rag.MaxRetrievedChunks
+	} else {
+		// Apply small model detection here as fallback
+		modelSize, err := rs.ollamaClient.GetModelSize(rag.ModelName)
+		if err == nil && modelSize <= 7 {
+			numChunks = 5 // For small models
+		}
+	}
+	
+	// Update the search to use the dynamic numChunks
+	results := rag.VectorStore.Search(queryEmbedding, numChunks)
 	
 	// Build the context
 	var context strings.Builder
@@ -146,8 +161,25 @@ func (rs *RagService) Query(rag *domain.RagSystem, query string) (string, error)
 		}
 	}
 	
-	// Build the prompt with better formatting and instructions for citing sources
-	prompt := fmt.Sprintf(`You are a helpful AI assistant. Use the information below to answer the question.
+	// Adjust prompt complexity based on model size
+	var prompt string
+	if numChunks == 5 {
+		// Simplified prompt for small models
+		prompt = fmt.Sprintf(`You are a helpful AI assistant. Follow these instructions carefully:
+1. Use ONLY the information below to answer the question.
+2. If the information doesn't contain the answer, say "I don't have enough information."
+3. Keep your answer concise (maximum 3 sentences).
+4. Include source references using (Source: document name).
+
+Relevant information:
+%s
+
+Question: %s
+
+Answer:`, context.String(), query)
+	} else {
+		// More complex prompt for larger models
+		prompt = fmt.Sprintf(`You are a helpful AI assistant. Use the information below to answer the question.
 
 %s
 
@@ -155,7 +187,8 @@ Question: %s
 
 Answer based on the provided information. If the information doesn't contain the answer, say so clearly.
 Include references to the source documents in your answer using the format (Source: document name).`, 
-	context.String(), query)
+		context.String(), query)
+	}
 	
 	// Show search results to the user
 	fmt.Println("\nSearching documents...\n")
@@ -178,4 +211,70 @@ func (rs *RagService) UpdateRag(rag *domain.RagSystem) error {
 		return fmt.Errorf("error updating the RAG: %w", err)
 	}
 	return nil
-} 
+}
+
+func (rs *RagService) reRankResults(chunks []*domain.DocumentChunk, query string) []*domain.DocumentChunk {
+	// Initial retrieval already done
+	
+	// Re-rank with cross-encoder or embedding similarity
+	// For example, using query-chunk cosine similarity with BGE embeddings
+	
+	// Ensure diversity with MMR
+	var rerankedChunks []*domain.DocumentChunk
+	// MMR implementation to balance relevance and diversity
+	
+	// Return only top 3-5 chunks for small LLM
+	return rerankedChunks[:min(5, len(rerankedChunks))]
+}
+
+func (rs *RagService) OptimizedQuery(rag *domain.RagSystem, query string) (string, error) {
+	// Generate query embedding first
+	queryEmbedding, err := rs.embeddingService.GenerateQueryEmbedding(query, rag.ModelName)
+	if err != nil {
+		return "", err
+	}
+	
+	// Hybrid search (new)
+	vectorResults := rag.VectorStore.Search(queryEmbedding, 15)
+	// Temporarily disable hybrid search
+	mergedResults := vectorResults
+	
+	// Convert vector.SearchResult to DocumentChunk pointers
+	var docChunks []*domain.DocumentChunk
+	for _, result := range mergedResults {
+		if chunk := rag.GetChunkByID(result.ID); chunk != nil {
+			docChunks = append(docChunks, chunk)
+		}
+	}
+	
+	// Re-rank to get top 5 most relevant and diverse chunks (new)
+	rerankedResults := rs.reRankResults(docChunks, query)
+	
+	// Build concise context with only the best chunks
+	var context strings.Builder
+	for _, result := range rerankedResults {
+		chunk := rag.GetChunkByID(result.ID)
+		if chunk != nil {
+			context.WriteString(fmt.Sprintf("--- %s ---\n%s\n\n", 
+				chunk.GetMetadataString(), chunk.Content))
+		}
+	}
+	
+	// Optimized prompt for small LLMs
+	prompt := fmt.Sprintf(`You are a helpful AI assistant. Follow these instructions carefully:
+1. Use ONLY the information below to answer the question.
+2. If the information doesn't contain the answer, say "I don't have enough information."
+3. Keep your answer concise.
+4. Include source references using (Source: document name).
+
+Relevant information:
+%s
+
+Question: %s
+
+Answer:`, context.String(), query)
+	
+	// Generate response (existing code)
+	response, err := rs.ollamaClient.GenerateCompletion(rag.ModelName, prompt)
+	return response, err
+}

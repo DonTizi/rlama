@@ -54,7 +54,7 @@ and add them to the existing RAG system.`,
 		fmt.Printf("Successfully loaded %d documents. Generating embeddings...\n", len(docs))
 
 		// Create chunker service
-		chunkerService := service.NewChunkerService(service.DefaultChunkingConfig())
+		chunkerService := service.NewChunkerService(1500, 150)
 
 		// Process each document - chunk and generate embeddings
 		var allChunks []*domain.DocumentChunk

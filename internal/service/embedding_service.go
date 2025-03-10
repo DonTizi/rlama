@@ -104,4 +104,4 @@ func (es *EmbeddingService) GenerateChunkEmbeddings(chunks []*domain.DocumentChu
 	}
 	fmt.Println() // Add a newline after progress indicator
 	return nil
-} 
+}

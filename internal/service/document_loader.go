@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/dontizi/rlama/internal/domain"
+	"github.com/ledongthuc/pdf"
 )
 
 // DocumentLoader is responsible for loading documents from the file system
@@ -465,4 +466,39 @@ func (dl *DocumentLoader) tryInstallDependencies() {
 			}
 		}
 	}
+}
+
+// Add this function to extract text from PDFs
+func extractTextFromPDF(pdfPath string) (string, error) {
+	// Add a dependency for PDF text extraction
+	// go get github.com/ledongthuc/pdf
+	
+	f, err := os.Open(pdfPath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	
+	// Use the PDF library to extract text
+	pdfReader, err := pdf.NewReader(f, f.Size())
+	if err != nil {
+		return "", err
+	}
+	
+	var textBuilder strings.Builder
+	for i := 1; i <= pdfReader.NumPage(); i++ {
+		page := pdfReader.Page(i)
+		if page.V.IsNull() {
+			continue
+		}
+		
+		text, err := page.GetPlainText(nil)
+		if err != nil {
+			continue // Skip pages with errors
+		}
+		
+		textBuilder.WriteString(text)
+	}
+	
+	return textBuilder.String(), nil
 } 

@@ -24,21 +24,33 @@ func DefaultChunkingConfig() ChunkingConfig {
 
 // ChunkerService handles splitting documents into manageable chunks
 type ChunkerService struct {
+	ChunkSize    int
+	ChunkOverlap int
 	config ChunkingConfig
 }
 
 // NewChunkerService creates a new chunker service with the specified config
-func NewChunkerService(config ChunkingConfig) *ChunkerService {
+func NewChunkerService(chunkSize, chunkOverlap int) *ChunkerService {
+	// Use provided parameters or defaults
+	if chunkSize <= 0 {
+		chunkSize = 1500  // Default
+	}
+	if chunkOverlap <= 0 {
+		chunkOverlap = 150  // Default
+	}
+	
 	return &ChunkerService{
-		config: config,
+		ChunkSize:    chunkSize,
+		ChunkOverlap: chunkOverlap,
+		config:       DefaultChunkingConfig(),
 	}
 }
 
 // ChunkDocument splits a document into smaller chunks with metadata
 func (cs *ChunkerService) ChunkDocument(doc *domain.Document) []*domain.DocumentChunk {
 	content := doc.Content
-	chunkSize := cs.config.ChunkSize
-	overlap := cs.config.ChunkOverlap
+	chunkSize := cs.ChunkSize
+	overlap := cs.ChunkOverlap
 	
 	// For very small documents, just return a single chunk
 	if len(content) <= chunkSize {
@@ -52,12 +64,16 @@ func (cs *ChunkerService) ChunkDocument(doc *domain.Document) []*domain.Document
 		return cs.createFixedSizeChunks(doc, content, chunkSize, overlap)
 	}
 	
-	// For medium-sized documents, try the semantic paragraph approach
-	chunks := cs.createParagraphBasedChunks(doc, content, chunkSize, overlap)
+	// New settings for small LLMs
+	smallerChunkSize := 800 // Reduce from current 1500
+	increasedOverlap := 200 // Increase from current 150
+	
+	// More sentence-aware chunking to maintain coherence
+	chunks := cs.createParagraphBasedChunks(doc, content, smallerChunkSize, increasedOverlap)
 	
 	// Safeguard: If we still only got 1 chunk for a large document, force fixed-size chunking
-	if len(chunks) == 1 && len(content) > chunkSize*2 {
-		return cs.createFixedSizeChunks(doc, content, chunkSize, overlap)
+	if len(chunks) == 1 && len(content) > smallerChunkSize*2 {
+		return cs.createFixedSizeChunks(doc, content, smallerChunkSize, increasedOverlap)
 	}
 	
 	fmt.Printf("Split document '%s' into %d chunks\n", doc.Name, len(chunks))
