@@ -11,7 +11,7 @@ import (
 )
 
 const (
-	Version = "0.1.25" // Current version of RLAMA
+	Version = "0.1.26" // Current version of RLAMA
 )
 
 var rootCmd = &cobra.Command{
