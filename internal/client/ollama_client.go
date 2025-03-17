@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -9,6 +10,8 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"bufio"
+	"time"
 )
 
 // Default connection settings for Ollama
@@ -34,32 +37,39 @@ type EmbeddingResponse struct {
 	Embedding []float32 `json:"embedding"`
 }
 
-// GenerationRequest est la structure de la requête pour l'API /api/generate
-type GenerationRequest struct {
-	Model    string   `json:"model"`
-	Prompt   string   `json:"prompt"`
-	Context  []int    `json:"context,omitempty"`
-	Options  Options  `json:"options,omitempty"`
-	Format   string   `json:"format,omitempty"`
-	Template string   `json:"template,omitempty"`
-	Stream   bool     `json:"stream"`
+// GenerateOptions représente les options pour une requête de génération à Ollama
+type GenerateOptions struct {
+	Model       string      `json:"model"`
+	Prompt      string      `json:"prompt"`
+	System      string      `json:"system,omitempty"`
+	Template    string      `json:"template,omitempty"`
+	Context     []int       `json:"context,omitempty"`
+	Format      string      `json:"format,omitempty"`
+	Stream      bool        `json:"stream,omitempty"`
+	Raw         bool        `json:"raw,omitempty"`
+	Options     interface{} `json:"options,omitempty"`
+	Temperature float64     `json:"temperature,omitempty"`
+	TopP        float64     `json:"top_p,omitempty"`
+	TopK        int         `json:"top_k,omitempty"`
+	MaxTokens   int         `json:"num_predict,omitempty"`
+	Tools       []Tool      `json:"tools,omitempty"`
 }
 
-// Options pour l'API generate
-type Options struct {
-	Temperature float64 `json:"temperature,omitempty"`
-	TopP        float64 `json:"top_p,omitempty"`
-	TopK        int     `json:"top_k,omitempty"`
-	NumPredict  int     `json:"num_predict,omitempty"`
+// Tool représente un outil pouvant être utilisé par le LLM
+type Tool struct {
+	Name        string                 `json:"name"`
+	Description string                 `json:"description"`
+	Function    func(string) (string, error) `json:"-"`
 }
 
-// GenerationResponse est la structure de la réponse de l'API /api/generate
+// GenerationResponse représente la réponse d'une requête de génération
 type GenerationResponse struct {
 	Model     string `json:"model"`
 	Response  string `json:"response"`
-	Context   []int  `json:"context"`
 	CreatedAt string `json:"created_at"`
 	Done      bool   `json:"done"`
+	Context   []int  `json:"context,omitempty"`
+	// Ajoutez d'autres champs si nécessaire
 }
 
 // NewOllamaClient crée un nouveau client Ollama
@@ -93,7 +103,8 @@ func NewOllamaClient(host, port string) *OllamaClient {
 		port = defaultPort
 	}
 	
-	baseURL := fmt.Sprintf("http://%s:%s", host, port)
+	// Store base URL without http:// prefix
+	baseURL := fmt.Sprintf("%s:%s", host, port)
 	
 	return &OllamaClient{
 		BaseURL: baseURL,
@@ -101,10 +112,34 @@ func NewOllamaClient(host, port string) *OllamaClient {
 	}
 }
 
-// NewDefaultOllamaClient crée un nouveau client Ollama avec les valeurs par défaut
-// Gardé pour compatibilité avec le code existant
+// NewDefaultOllamaClient creates a new Ollama client with default settings
 func NewDefaultOllamaClient() *OllamaClient {
-	return NewOllamaClient(DefaultOllamaHost, DefaultOllamaPort)
+	host := DefaultOllamaHost
+	port := DefaultOllamaPort
+	
+	// Check for OLLAMA_HOST environment variable
+	if envHost := os.Getenv("OLLAMA_HOST"); envHost != "" {
+		// If it contains a port, extract it
+		if strings.Contains(envHost, ":") {
+			parts := strings.Split(envHost, ":")
+			host = parts[0]
+			if len(parts) > 1 {
+				port = parts[1]
+			}
+		} else {
+			host = envHost
+		}
+	}
+	
+	// Create the base URL without http:// prefix - we'll add it in the request methods
+	baseURL := fmt.Sprintf("%s:%s", host, port)
+	
+	return &OllamaClient{
+		BaseURL: baseURL,
+		Client: &http.Client{
+			Timeout: 60 * time.Second,
+		},
+	}
 }
 
 // GenerateEmbedding génère un embedding pour le texte donné
@@ -142,17 +177,12 @@ func (c *OllamaClient) GenerateEmbedding(model, text string) ([]float32, error) 
 	return embeddingResp.Embedding, nil
 }
 
-// GenerateCompletion génère une réponse pour le prompt donné
-func (c *OllamaClient) GenerateCompletion(model, prompt string) (string, error) {
-	reqBody := GenerationRequest{
-		Model:  model,
-		Prompt: prompt,
-		Stream: false,
-		Options: Options{
-			Temperature: 0.7,
-			TopP:        0.9,
-			NumPredict:  1024,
-		},
+// GenerateCompletion génère une réponse basée sur un historique de messages
+func (c *OllamaClient) GenerateCompletion(model string, messages []map[string]string) (string, error) {
+	reqBody := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+		"stream":   false,
 	}
 
 	reqJSON, err := json.Marshal(reqBody)
@@ -161,7 +191,7 @@ func (c *OllamaClient) GenerateCompletion(model, prompt string) (string, error) 
 	}
 
 	resp, err := c.Client.Post(
-		fmt.Sprintf("%s/api/generate", c.BaseURL),
+		fmt.Sprintf("%s/api/chat", c.BaseURL),
 		"application/json",
 		bytes.NewBuffer(reqJSON),
 	)
@@ -175,12 +205,19 @@ func (c *OllamaClient) GenerateCompletion(model, prompt string) (string, error) 
 		return "", fmt.Errorf("failed to generate completion: %s (status: %d)", string(bodyBytes), resp.StatusCode)
 	}
 
-	var genResp GenerationResponse
-	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {
+	var chatResp map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&chatResp); err != nil {
 		return "", err
 	}
 
-	return genResp.Response, nil
+	// Extraire la réponse
+	if message, ok := chatResp["message"].(map[string]interface{}); ok {
+		if content, ok := message["content"].(string); ok {
+			return content, nil
+		}
+	}
+
+	return "", fmt.Errorf("invalid response format")
 }
 
 // IsOllamaRunning checks if Ollama is installed and running
@@ -220,19 +257,79 @@ func (c *OllamaClient) CheckOllamaAndModel(modelName string) error {
 	return nil
 }
 
-// RunHuggingFaceModel prepares a Hugging Face model for use with Ollama
-func (c *OllamaClient) RunHuggingFaceModel(hfModelPath string, quantization string) error {
-	modelRef := "hf.co/" + hfModelPath
-	if quantization != "" {
-		modelRef += ":" + quantization
+// RunHuggingFaceModel exécute un modèle Hugging Face en mode interactif
+func (c *OllamaClient) RunHuggingFaceModel(modelPath string, quantization string) error {
+	// Extraction du nom du modèle et quantization
+	hfModelName := GetHuggingFaceModelName(modelPath)
+	
+	// Si quantization n'est pas spécifiée dans les arguments mais dans le chemin du modèle
+	if quantization == "" {
+		quantization = GetQuantizationFromModelRef(modelPath)
 	}
 	
-	cmd := exec.Command("ollama", "run", modelRef)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
+	// Pull le modèle depuis Hugging Face si nécessaire
+	err := c.PullHuggingFaceModel(hfModelName, quantization)
+	if err != nil {
+		return fmt.Errorf("error pulling Hugging Face model: %w", err)
+	}
 	
-	return cmd.Run()
+	// Construire le nom du modèle local
+	localModelName := strings.Replace(hfModelName, "/", "-", -1)
+	if quantization != "" {
+		localModelName += "-" + quantization
+	}
+	
+	// Mode interactif
+	fmt.Printf("\nRunning model %s. Type your messages (or 'exit' to quit):\n\n", localModelName)
+	
+	scanner := bufio.NewReader(os.Stdin)
+	messages := []map[string]string{
+		{"role": "system", "content": "You are a helpful assistant."},
+	}
+	
+	for {
+		fmt.Print("> ")
+		userInput, _ := scanner.ReadString('\n')
+		userInput = strings.TrimSpace(userInput)
+		
+		if userInput == "exit" {
+			break
+		}
+		
+		if userInput == "" {
+			continue
+		}
+		
+		// Ajouter le message utilisateur
+		messages = append(messages, map[string]string{
+			"role":    "user",
+			"content": userInput,
+		})
+		
+		// Générer la réponse
+		response, err := c.GenerateCompletion(localModelName, messages)
+		if err != nil {
+			fmt.Printf("Error: %v\n", err)
+			continue
+		}
+		
+		// Afficher la réponse
+		fmt.Println("\n" + response + "\n")
+		
+		// Ajouter la réponse à l'historique
+		messages = append(messages, map[string]string{
+			"role":    "assistant",
+			"content": response,
+		})
+		
+		// Limiter la taille de l'historique pour éviter les débordements de contexte
+		if len(messages) > 10 {
+			// Garder le message système et les 9 derniers messages
+			messages = append(messages[:1], messages[len(messages)-9:]...)
+		}
+	}
+	
+	return nil
 }
 
 // PullHuggingFaceModel pulls a Hugging Face model into Ollama without running it
@@ -279,4 +376,179 @@ func GetQuantizationFromModelRef(modelRef string) string {
 		return modelRef[colonIdx+1:]
 	}
 	return ""
+}
+
+// ListModels récupère la liste des modèles disponibles sur le serveur Ollama
+func (c *OllamaClient) ListModels() ([]string, error) {
+	resp, err := c.Client.Get(fmt.Sprintf("%s/api/tags", c.BaseURL))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to list models: %s (status: %d)", string(bodyBytes), resp.StatusCode)
+	}
+
+	var listResp map[string]interface{}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		return nil, err
+	}
+
+	// Extraire les noms des modèles
+	var models []string
+	if modelsArray, ok := listResp["models"].([]interface{}); ok {
+		for _, modelInfo := range modelsArray {
+			if model, ok := modelInfo.(map[string]interface{}); ok {
+				if name, ok := model["name"].(string); ok {
+					models = append(models, name)
+				}
+			}
+		}
+	}
+
+	return models, nil
+}
+
+// SendCompletion envoie une requête de complétion à Ollama avec un timeout
+func (oc *OllamaClient) SendCompletion(prompt string, model string) (string, error) {
+	// Créer un contexte avec timeout
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Préparer le payload de la requête
+	payload := map[string]interface{}{
+		"prompt": prompt,
+		"model":  model,
+		"stream": false,
+	}
+
+	reqJSON, err := json.Marshal(payload)
+	if err != nil {
+		return "", fmt.Errorf("erreur de sérialisation JSON: %w", err)
+	}
+
+	// Créer la requête avec le contexte (pour le timeout)
+	reqURL := fmt.Sprintf("%s/api/generate", oc.BaseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", reqURL, bytes.NewBuffer(reqJSON))
+	if err != nil {
+		return "", fmt.Errorf("erreur de création de la requête: %w", err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	// Exécuter la requête
+	resp, err := oc.Client.Do(req)
+	if err != nil {
+		// Vérifier si l'erreur est due au timeout
+		if ctx.Err() == context.DeadlineExceeded {
+			return "", fmt.Errorf("timeout: la requête a pris trop de temps")
+		}
+		return "", fmt.Errorf("erreur d'envoi de la requête: %w", err)
+	}
+	defer resp.Body.Close()
+
+	// Vérifier le code de statut
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("erreur API (status %d): %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	// Lire et traiter la réponse
+	var genResp GenerationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {
+		return "", fmt.Errorf("erreur de décodage de la réponse: %w", err)
+	}
+
+	return genResp.Response, nil
+}
+
+// Ping vérifie la connexion à Ollama
+func (oc *OllamaClient) Ping() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	
+	// Ajouter le préfixe http:// à l'URL
+	url := fmt.Sprintf("http://%s/api/version", oc.BaseURL)
+	
+	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
+	if err != nil {
+		return err
+	}
+	
+	resp, err := oc.Client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	
+	if resp.StatusCode != http.StatusOK {
+		return fmt.Errorf("Ollama a répondu avec le code: %d", resp.StatusCode)
+	}
+	
+	return nil
+}
+
+// GenerateWithTimeout génère du texte avec un timeout configurable
+func (c *OllamaClient) GenerateWithTimeout(ctx context.Context, options GenerateOptions) (string, error) {
+	// Préparer l'URL
+	url := fmt.Sprintf("http://%s/api/generate", c.BaseURL)
+	
+	// Préparer la requête JSON
+	requestBody, err := json.Marshal(options)
+	if err != nil {
+		return "", fmt.Errorf("error marshaling request: %w", err)
+	}
+	
+	// Créer la requête HTTP
+	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBuffer(requestBody))
+	if err != nil {
+		return "", fmt.Errorf("error creating request: %w", err)
+	}
+	
+	// Configurer les headers
+	req.Header.Set("Content-Type", "application/json")
+	
+	// Envoyer la requête
+	client := &http.Client{
+		Timeout: 5 * time.Minute,
+	}
+	
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("error sending request: %w", err)
+	}
+	defer resp.Body.Close()
+	
+	// Vérifier le code de statut
+	if resp.StatusCode != http.StatusOK {
+		body, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("error response from Ollama: %s", string(body))
+	}
+	
+	// Lire la réponse ligne par ligne pour gérer le streaming
+	var fullResponse strings.Builder
+	scanner := bufio.NewScanner(resp.Body)
+	
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		
+		// Décoder chaque ligne comme un objet JSON séparé
+		var response GenerationResponse
+		if err := json.Unmarshal([]byte(line), &response); err != nil {
+			return "", fmt.Errorf("error unmarshaling response: %w", err)
+		}
+		
+		// Ajouter le texte de la réponse
+		fullResponse.WriteString(response.Response)
+	}
+	
+	if err := scanner.Err(); err != nil {
+		return "", fmt.Errorf("error reading response stream: %w", err)
+	}
+	
+	return fullResponse.String(), nil
 } 
