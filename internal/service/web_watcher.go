@@ -2,6 +2,7 @@ package service
 
 import (
 	"fmt"
+	"io/ioutil"
 	"os"
 	"path/filepath"
 	"strings"
@@ -13,13 +14,23 @@ import (
 
 // WebWatcher is responsible for watching websites for content changes
 type WebWatcher struct {
-	ragService RagService
+	ragService     RagService
+	agentService   *AgentService
 }
 
 // NewWebWatcher creates a new web watcher service
-func NewWebWatcher(ragService RagService) *WebWatcher {
+func NewWebWatcher(ragService RagService, agentService *AgentService) *WebWatcher {
 	return &WebWatcher{
-		ragService: ragService,
+		ragService:   ragService,
+		agentService: agentService,
+	}
+}
+
+// Fonction adaptée pour créer un WebWatcher sans AgentService
+func NewWebWatcherWithoutAgent(ragService RagService) *WebWatcher {
+	return &WebWatcher{
+		ragService:   ragService,
+		agentService: nil,
 	}
 }
 
@@ -175,6 +186,61 @@ func (ww *WebWatcher) CheckAndUpdateRag(rag *domain.RagSystem) (int, error) {
 	err = ww.ragService.UpdateRag(rag)
 	if err != nil {
 		return 0, fmt.Errorf("error saving updated RAG: %w", err)
+	}
+
+	// S'il y a des modifications et qu'un agent ou crew est lié
+	if ww.agentService != nil && len(processedDocs) > 0 && (rag.LinkedAgentID != "" || rag.LinkedCrewID != "") {
+		// Préparer le dossier de sortie
+		outputDir := rag.OutputDirectory
+		if outputDir == "" {
+			outputDir = "agent-docs"
+		}
+		
+		// Créer le dossier s'il n'existe pas
+		if err := os.MkdirAll(outputDir, 0755); err != nil {
+			return len(processedDocs), fmt.Errorf("erreur lors de la création du dossier de sortie: %w", err)
+		}
+		
+		// Exécuter l'agent ou le crew lié
+		var result string
+		if rag.LinkedAgentID != "" {
+			// Exécuter l'agent
+			agent, err := (*ww.agentService).LoadAgent(rag.LinkedAgentID)
+			if err != nil {
+				return len(processedDocs), fmt.Errorf("erreur lors du chargement de l'agent: %w", err)
+			}
+			
+			result, err = (*ww.agentService).RunAgent(agent, rag.LinkedPrompt)
+			if err != nil {
+				return len(processedDocs), fmt.Errorf("erreur lors de l'exécution de l'agent: %w", err)
+			}
+		} else if rag.LinkedCrewID != "" {
+			// Exécuter le crew
+			crew, err := (*ww.agentService).LoadCrew(rag.LinkedCrewID)
+			if err != nil {
+				return len(processedDocs), fmt.Errorf("erreur lors du chargement du crew: %w", err)
+			}
+			
+			results, err := (*ww.agentService).RunCrew(crew, rag.LinkedPrompt)
+			if err != nil {
+				return len(processedDocs), fmt.Errorf("erreur lors de l'exécution du crew: %w", err)
+			}
+			
+			// Convertir les résultats du crew en un seul résultat
+			for agentID, res := range results {
+				result += fmt.Sprintf("=== Résultat de %s ===\n\n%s\n\n", agentID, res)
+			}
+		}
+		
+		// Sauvegarder les résultats dans des fichiers
+		timestamp := time.Now().Format("2006-01-02_15-04-05")
+		filename := filepath.Join(outputDir, fmt.Sprintf("%s_%s.md", rag.Name, timestamp))
+		
+		if err := ioutil.WriteFile(filename, []byte(result), 0644); err != nil {
+			return len(processedDocs), fmt.Errorf("erreur lors de la sauvegarde des résultats: %w", err)
+		}
+		
+		fmt.Printf("Résultats de l'agent/crew sauvegardés dans %s\n", filename)
 	}
 
 	return len(processedDocs), nil

@@ -28,6 +28,11 @@ type RagSystem struct {
 	WebWatchInterval int                 `json:"web_watch_interval,omitempty"` // In minutes
 	LastWebWatchAt  time.Time            `json:"last_web_watched_at,omitempty"`
 	WebWatchOptions WebWatchOptions      `json:"web_watch_options,omitempty"`
+	// New fields
+	LinkedAgentID    string              // ID de l'agent lié
+	LinkedCrewID     string              // ID du crew lié
+	LinkedPrompt     string              // Instruction à envoyer lors d'un changement
+	OutputDirectory  string              // Dossier de sortie des résultats
 }
 
 // DocumentWatchOptions stores settings for directory watching

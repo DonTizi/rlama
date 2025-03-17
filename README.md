@@ -46,6 +46,12 @@ RLAMA is a powerful AI-driven question-answering tool for your documents, seamle
   - [version - Display version](#version---display-version)
   - [hf-browse - Browse GGUF models on Hugging Face](#hf-browse---browse-gguf-models-on-hugging-face)
   - [run-hf - Run a Hugging Face GGUF model](#run-hf---run-a-hugging-face-gguf-model)
+  - [agent - Manage AI agents](#agent---manage-ai-agents)
+  - [create - Create a new agent](#create---create-a-new-agent)
+  - [list - List all agents](#list---list-all-agents)
+  - [delete - Delete an agent](#delete---delete-an-agent)
+  - [run - Execute an agent](#run---execute-an-agent)
+  - [wizard-agent - Create agents interactively](#wizard-agent---create-agents-interactively)
 - [Uninstallation](#uninstallation)
 - [Supported Document Formats](#supported-document-formats)
 - [Troubleshooting](#troubleshooting)
@@ -403,7 +409,7 @@ rlama run [rag-name]
 
 **Parameters:**
 - `rag-name`: Name of the RAG system to use.
-- `--context-size`: (Optional) Number of context chunks to retrieve (default: 20)
+--context-size`: (Optional) Number of context chunks to retrieve (default: 20)
 
 **Example:**
 
@@ -717,6 +723,108 @@ rlama run-hf bartowski/Llama-3.2-1B-Instruct-GGUF
 
 # Specify quantization
 rlama run-hf mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF --quant Q5_K_M
+```
+
+### agent - Manage AI agents
+
+Manage AI agents related to RAG systems.
+
+#### create - Create a new agent
+
+Create a new AI agent for a specific RAG system.
+
+```bash
+rlama agent create [rag-name] [agent-name]
+```
+
+**Parameters:**
+- `rag-name`: Name of the RAG system
+- `agent-name`: Unique name for the new agent
+
+**Example:**
+
+```bash
+rlama agent create my-rag my-new-agent
+```
+
+#### list - List all agents
+
+List all AI agents available in the system.
+
+```bash
+rlama agent list
+```
+
+#### delete - Delete an agent
+
+Delete an existing AI agent from the system.
+
+```bash
+rlama agent delete [agent-name]
+```
+
+**Parameters:**
+- `agent-name`: Name of the agent to delete
+
+**Example:**
+
+```bash
+rlama agent delete my-new-agent
+```
+
+#### run - Execute an agent
+
+Execute an existing AI agent for a specific RAG system.
+
+```bash
+rlama agent run [rag-name] [agent-name]
+```
+
+**Parameters:**
+- `rag-name`: Name of the RAG system
+- `agent-name`: Name of the agent to execute
+
+**Example:**
+
+```bash
+rlama agent run my-rag my-new-agent
+```
+
+### wizard-agent - Create agents interactively
+
+Provides an interactive step-by-step wizard for creating new AI agents.
+
+```bash
+rlama wizard-agent
+```
+
+The wizard guides you through:
+- Naming your agent
+- Choosing a role for the agent
+- Selecting a model for the agent
+- Configuring any additional parameters
+
+**Example:**
+
+```bash
+rlama wizard-agent
+# Follow the prompts to create your customized agent
+```
+
+### wizard-agent with Input File
+You can also create agents using a predefined input file.
+
+```bash
+rlama agent wizard --input-file path/to/file
+```
+
+**Parameters:**
+- `--input-file`: Path to the file containing the input.
+
+**Example:**
+
+```bash
+rlama agent wizard --input-file tmp/test-release.json
 ```
 
 ## Uninstallation

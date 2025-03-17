@@ -2,396 +2,450 @@ package cmd
 
 import (
 	"bufio"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"os"
+	"path/filepath"
+	"strconv"
 	"strings"
-	"os/exec"
-	"bytes"
-	
-	"github.com/spf13/cobra"
-	"github.com/dontizi/rlama/internal/service"
-	"github.com/dontizi/rlama/internal/crawler"
-)
+	"time"
 
-// Structure pour parser la sortie JSON d'Ollama list
-type OllamaModel struct {
-	Name       string `json:"name"`
-	Size       int64  `json:"size"`
-	ModifiedAt string `json:"modified_at"`
-	Digest     string `json:"digest"`
-}
+	"github.com/dontizi/rlama/internal/domain"
+	"github.com/dontizi/rlama/internal/service"
+	"github.com/spf13/cobra"
+	"github.com/fatih/color"
+)
 
 var (
-	// Variables pour le wizard local
-	localWizardModel       string
-	localWizardName        string
-	localWizardPath        string
-	localWizardChunkSize   int
-	localWizardChunkOverlap int
-	localWizardExcludeDirs []string
-	localWizardExcludeExts []string
-	localWizardProcessExts []string
+	autoRun    bool
+	inputFile  string
+	watchDir   string
 )
 
-// Renommé pour éviter le conflit avec snowflake_wizard.go
-var localWizardCmd = &cobra.Command{
+var wizardCmd = &cobra.Command{
 	Use:   "wizard",
-	Short: "Interactive wizard to create a local RAG",
-	Long: `Start an interactive wizard that guides you through creating a RAG system.
-This makes it easy to set up a new RAG without remembering all command options.`,
+	Short: "Crew creation wizard",
+	Long:  `Interactive wizard to create and configure crews and their workflows.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println("\n🧙 Welcome to the RLAMA Local RAG Wizard! 🧙\n")
-		
 		reader := bufio.NewReader(os.Stdin)
 		
-		// Étape 1: Nom du RAG
-		fmt.Print("Enter a name for your RAG: ")
-		ragName, _ := reader.ReadString('\n')
-		ragName = strings.TrimSpace(ragName)
-		if ragName == "" {
-			return fmt.Errorf("RAG name cannot be empty")
-		}
+		// Terminal colors
+		titleColor := color.New(color.FgCyan, color.Bold)
+		promptColor := color.New(color.FgGreen)
+		successColor := color.New(color.FgGreen, color.Bold)
+		infoColor := color.New(color.FgYellow)
 		
-		// Déclarer modelName au niveau de la fonction pour qu'il soit disponible partout
-		var modelName string
-		
-		// Étape 2: Sélection du modèle
-		fmt.Println("\nStep 2: Select a model")
-		
-		// Récupérer la liste des modèles disponibles via la commande ollama list
-		fmt.Println("Retrieving available Ollama models...")
-		
-		// Tester d'abord avec ollama list sans --json pour plus de compatibilité
-		// et capturer stderr pour le débogage
-		var stdout, stderr bytes.Buffer
-		ollamaCmd := exec.Command("ollama", "list")
-		ollamaCmd.Stdout = &stdout
-		ollamaCmd.Stderr = &stderr
-		
-		// Configuration pour l'exécution de la commande
-		ollamaHost := os.Getenv("OLLAMA_HOST")
-		if cmd.Flag("host").Changed {
-			ollamaHost = cmd.Flag("host").Value.String()
-		}
-		
-		if ollamaHost != "" {
-			// Définir la variable d'environnement OLLAMA_HOST pour la commande
-			ollamaCmd.Env = append(os.Environ(), fmt.Sprintf("OLLAMA_HOST=%s", ollamaHost))
-		}
-		
-		// Exécuter la commande
-		err := ollamaCmd.Run()
+		titleColor.Println("\n=== RLAMA Crew Creation Wizard ===")
+		fmt.Println()
+		infoColor.Println("This wizard will guide you through creating a complete crew.")
+		infoColor.Println("A crew is a group of agents organized in a workflow to accomplish complex tasks.")
+		fmt.Println()
+
+		// Create base crew
+		crew, err := createCrewWizard(reader, promptColor)
 		if err != nil {
-			fmt.Println("❌ Failed to list Ollama models.")
-			if stderr.Len() > 0 {
-				fmt.Printf("Error details: %s\n", stderr.String())
-			}
-			fmt.Println("Make sure Ollama is installed and running.")
-			fmt.Println("Continuing without model list. You'll need to enter a model name manually.")
+			return err
 		}
-		
-		// Analyser la sortie de ollama list (format texte)
-		modelsOutput := stdout.String()
-		var modelNames []string
-		
-		if modelsOutput != "" {
-			// Format typique:
-			// NAME             ID            SIZE    MODIFIED
-			// llama3           xxx...xxx     4.7 GB  X days ago
-			
-			// Ignorer la première ligne (en-têtes)
-			lines := strings.Split(modelsOutput, "\n")
-			for i, line := range lines {
-				if i == 0 || strings.TrimSpace(line) == "" {
-					continue
-				}
-				
-				fields := strings.Fields(line)
-				if len(fields) >= 1 {
-					modelNames = append(modelNames, fields[0])
-				}
-			}
-			
-			// Afficher les modèles dans notre format
-			if len(modelNames) > 0 {
-				fmt.Println("\nAvailable models:")
-				for i, name := range modelNames {
-					fmt.Printf("  %d. %s\n", i+1, name)
-				}
-				
-				// Permettre à l'utilisateur de choisir un modèle
-				fmt.Print("\nChoose a model (number) or enter model name: ")
-				modelChoice, _ := reader.ReadString('\n')
-				modelChoice = strings.TrimSpace(modelChoice)
-				
-				// Vérifier si l'utilisateur a entré un numéro
-				var modelNumber int
-				modelName = "" // Initialiser ici aussi
-				
-				if _, err := fmt.Sscanf(modelChoice, "%d", &modelNumber); err == nil {
-					// L'utilisateur a entré un numéro
-					if modelNumber > 0 && modelNumber <= len(modelNames) {
-						modelName = modelNames[modelNumber-1]
-					} else {
-						fmt.Println("Invalid selection. Please enter a valid model name manually.")
-					}
-				} else {
-					// L'utilisateur a entré un nom directement
-					modelName = modelChoice
-				}
-			}
-		}
-		
-		// Si aucun modèle n'a été sélectionné, demander manuellement
-		if modelName == "" {
-			fmt.Print("Enter model name [llama3]: ")
-			inputName, _ := reader.ReadString('\n')
-			inputName = strings.TrimSpace(inputName)
-			if inputName == "" {
-				modelName = "llama3"
-			} else {
-				modelName = inputName
-			}
-		}
-		
-		// Nouvelle Étape 3: Choisir entre documents locaux ou site web
-		fmt.Println("\nStep 3: Choose document source")
-		fmt.Println("1. Local document folder")
-		fmt.Println("2. Crawl a website")
-		fmt.Print("\nSelect option (1/2): ")
-		sourceChoice, _ := reader.ReadString('\n')
-		sourceChoice = strings.TrimSpace(sourceChoice)
-		
-		var folderPath string
-		var websiteURL string
-		var maxDepth, concurrency int
-		var excludePaths []string
-		var useWebCrawler bool
-		
-		if sourceChoice == "2" {
-			// Option crawler de site web
-			useWebCrawler = true
-			
-			// Demander l'URL du site
-			fmt.Print("\nEnter website URL to crawl: ")
-			websiteURL, _ = reader.ReadString('\n')
-			websiteURL = strings.TrimSpace(websiteURL)
-			if websiteURL == "" {
-				return fmt.Errorf("website URL cannot be empty")
-			}
-			
-			// Profondeur de crawling
-			fmt.Print("Maximum crawl depth [2]: ")
-			depthStr, _ := reader.ReadString('\n')
-			depthStr = strings.TrimSpace(depthStr)
-			maxDepth = 2 // valeur par défaut
-			if depthStr != "" {
-				fmt.Sscanf(depthStr, "%d", &maxDepth)
-			}
-			
-			// Concurrence
-			fmt.Print("Number of concurrent crawlers [5]: ")
-			concurrencyStr, _ := reader.ReadString('\n')
-			concurrencyStr = strings.TrimSpace(concurrencyStr)
-			concurrency = 5 // valeur par défaut
-			if concurrencyStr != "" {
-				fmt.Sscanf(concurrencyStr, "%d", &concurrency)
-			}
-			
-			// Chemins à exclure
-			fmt.Print("Paths to exclude (comma-separated): ")
-			excludePathsStr, _ := reader.ReadString('\n')
-			excludePathsStr = strings.TrimSpace(excludePathsStr)
-			if excludePathsStr != "" {
-				excludePaths = strings.Split(excludePathsStr, ",")
-				for i := range excludePaths {
-					excludePaths[i] = strings.TrimSpace(excludePaths[i])
-				}
-			}
-		} else {
-			// Option dossier local (code existant)
-			useWebCrawler = false
-			
-			fmt.Print("\nEnter path to document folder: ")
-			folderPath, _ = reader.ReadString('\n')
-			folderPath = strings.TrimSpace(folderPath)
-			if folderPath == "" {
-				return fmt.Errorf("folder path cannot be empty")
-			}
-		}
-		
-		// Étape 4: Options de chunking
-		fmt.Println("\nStep 4: Chunking options")
-		
-		fmt.Print("Chunk size [1000]: ")
-		chunkSizeStr, _ := reader.ReadString('\n')
-		chunkSizeStr = strings.TrimSpace(chunkSizeStr)
-		chunkSize := 1000
-		if chunkSizeStr != "" {
-			fmt.Sscanf(chunkSizeStr, "%d", &chunkSize)
-		}
-		
-		fmt.Print("Chunk overlap [200]: ")
-		overlapStr, _ := reader.ReadString('\n')
-		overlapStr = strings.TrimSpace(overlapStr)
-		overlap := 200
-		if overlapStr != "" {
-			fmt.Sscanf(overlapStr, "%d", &overlap)
-		}
-		
-		// Étape 5: Filtrer les fichiers (optionnel)
-		fmt.Println("\nStep 5: File filtering (optional)")
-		
-		fmt.Print("Exclude directories (comma-separated): ")
-		excludeDirsStr, _ := reader.ReadString('\n')
-		excludeDirsStr = strings.TrimSpace(excludeDirsStr)
-		var excludeDirs []string
-		if excludeDirsStr != "" {
-			excludeDirs = strings.Split(excludeDirsStr, ",")
-			for i := range excludeDirs {
-				excludeDirs[i] = strings.TrimSpace(excludeDirs[i])
-			}
-		}
-		
-		fmt.Print("Exclude extensions (comma-separated): ")
-		excludeExtsStr, _ := reader.ReadString('\n')
-		excludeExtsStr = strings.TrimSpace(excludeExtsStr)
-		var excludeExts []string
-		if excludeExtsStr != "" {
-			excludeExts = strings.Split(excludeExtsStr, ",")
-			for i := range excludeExts {
-				excludeExts[i] = strings.TrimSpace(excludeExts[i])
-			}
-		}
-		
-		fmt.Print("Process only these extensions (comma-separated): ")
-		processExtsStr, _ := reader.ReadString('\n')
-		processExtsStr = strings.TrimSpace(processExtsStr)
-		var processExts []string
-		if processExtsStr != "" {
-			processExts = strings.Split(processExtsStr, ",")
-			for i := range processExts {
-				processExts[i] = strings.TrimSpace(processExts[i])
-			}
-		}
-		
-		// Étape 6: Confirmation et création
-		fmt.Println("\nStep 6: Review and create")
-		fmt.Println("RAG configuration:")
-		fmt.Printf("- Name: %s\n", ragName)
-		fmt.Printf("- Model: %s\n", modelName)
-		
-		if useWebCrawler {
-			fmt.Printf("- Source: Website - %s\n", websiteURL)
-			fmt.Printf("- Crawl depth: %d\n", maxDepth)
-			fmt.Printf("- Concurrency: %d\n", concurrency)
-			if len(excludePaths) > 0 {
-				fmt.Printf("- Exclude paths: %s\n", strings.Join(excludePaths, ", "))
-			}
-		} else {
-			fmt.Printf("- Source: Local folder - %s\n", folderPath)
-			if len(excludeDirs) > 0 {
-				fmt.Printf("- Exclude directories: %s\n", strings.Join(excludeDirs, ", "))
-			}
-			if len(excludeExts) > 0 {
-				fmt.Printf("- Exclude extensions: %s\n", strings.Join(excludeExts, ", "))
-			}
-			if len(processExts) > 0 {
-				fmt.Printf("- Process only: %s\n", strings.Join(processExts, ", "))
-			}
-		}
-		
-		fmt.Printf("- Chunk size: %d\n", chunkSize)
-		fmt.Printf("- Chunk overlap: %d\n", overlap)
-		
-		fmt.Print("\nCreate RAG with these settings? (y/n): ")
-		confirm, _ := reader.ReadString('\n')
-		confirm = strings.ToLower(strings.TrimSpace(confirm))
-		
-		if confirm != "y" && confirm != "yes" {
-			fmt.Println("RAG creation cancelled.")
-			return nil
-		}
-		
-		// Créer le RAG
-		fmt.Println("\nCreating RAG...")
-		
-		// Obtenir le client Ollama configuré
-		ollamaClient := GetOllamaClient()
-		
-		// Vérifier que le modèle est disponible avant de continuer
-		// Cette étape est importante pour éviter les erreurs plus tard
-		fmt.Printf("Checking if model '%s' is available...\n", modelName)
-		err = ollamaClient.CheckOllamaAndModel(modelName)
+
+		// Add agents
+		err = addAgentsWizard(reader, crew, promptColor, successColor)
 		if err != nil {
-			return fmt.Errorf("model '%s' is not available: %w", modelName, err)
+			return err
 		}
-		
-		// Utiliser RagService pour créer le RAG
-		ragService := service.NewRagService(ollamaClient)
-		
-		if useWebCrawler {
-			// Utiliser le crawler
-			fmt.Printf("\nCrawling website '%s'...\n", websiteURL)
-			
-			// Créer le crawler
-			webCrawler, err := crawler.NewWebCrawler(websiteURL, maxDepth, concurrency, excludePaths)
-			if err != nil {
-				return fmt.Errorf("error initializing web crawler: %w", err)
-			}
-			
-			// Démarrer le crawling
-			documents, err := webCrawler.CrawlWebsite()
-			if err != nil {
-				return fmt.Errorf("error crawling website: %w", err)
-			}
-			
-			if len(documents) == 0 {
-				return fmt.Errorf("no content found when crawling %s", websiteURL)
-			}
-			
-			fmt.Printf("Retrieved %d pages from website. Processing content...\n", len(documents))
-			
-			// Créer un répertoire temporaire pour les documents
-			tempDir := createTempDirForDocuments(documents)
-			if tempDir != "" {
-				defer cleanupTempDir(tempDir)
-			}
-			
-			// Options pour le chargeur de documents
-			loaderOptions := service.DocumentLoaderOptions{
-				ChunkSize:    chunkSize,
-				ChunkOverlap: overlap,
-			}
-			
-			// Créer le RAG
-			err = ragService.CreateRagWithOptions(modelName, ragName, tempDir, loaderOptions)
-			if err != nil {
-				return err
-			}
-		} else {
-			// Utiliser le dossier local (code existant)
-			loaderOptions := service.DocumentLoaderOptions{
-				ExcludeDirs:  excludeDirs,
-				ExcludeExts:  excludeExts,
-				ProcessExts:  processExts,
-				ChunkSize:    chunkSize,
-				ChunkOverlap: overlap,
-			}
-			
-			err = ragService.CreateRagWithOptions(modelName, ragName, folderPath, loaderOptions)
+
+		// Configure workflow
+		err = configureWorkflowWizard(reader, crew, promptColor, infoColor)
+		if err != nil {
+			return err
+		}
+
+		// Configure automation if requested
+		if autoRun || watchDir != "" {
+			err = configureAutomation(crew, watchDir, inputFile)
 			if err != nil {
 				return err
 			}
 		}
+
+		// Save crew
+		err = saveCrew(crew)
+		if err != nil {
+			return err
+		}
+
+		successColor.Printf("\n✅ Crew '%s' created successfully (ID: %s)!\n", crew.Name, crew.ID)
 		
-		fmt.Println("\n🎉 RAG created successfully! 🎉")
-		fmt.Printf("\nYou can now use your RAG with: rlama run %s\n", ragName)
-		
+		if inputFile != "" {
+			promptColor.Printf("\nProcessing input file: %s\n", inputFile)
+			err = processInputFile(crew, inputFile)
+			if err != nil {
+				return err
+			}
+		}
+
+		infoColor.Println("\nYou can run this crew with the command:")
+		fmt.Printf("  rlama agent crew run %s \"your instruction\"\n", strings.ReplaceAll(crew.Name, " ", "-"))
+
 		return nil
 	},
 }
 
+func createCrewWizard(reader *bufio.Reader, promptColor *color.Color) (*domain.Crew, error) {
+	promptColor.Print("Crew name (no spaces): ")
+	crewName, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	crewName = strings.TrimSpace(crewName)
+	crewName = strings.ReplaceAll(crewName, " ", "-")
+
+	promptColor.Print("Crew description (optional): ")
+	description, err := reader.ReadString('\n')
+	if err != nil {
+		return nil, err
+	}
+	description = strings.TrimSpace(description)
+
+	var workflowType domain.WorkflowType
+	for {
+		promptColor.Print("Workflow type (sequential/parallel) [sequential]: ")
+		input, err := reader.ReadString('\n')
+		if err != nil {
+			return nil, err
+		}
+		
+		inputStr := strings.TrimSpace(input)
+		if inputStr == "" {
+			workflowType = domain.WorkflowSequential
+			break
+		}
+		
+		switch inputStr {
+		case "sequential":
+			workflowType = domain.WorkflowSequential
+			break
+		case "parallel":
+			workflowType = domain.WorkflowParallel
+			break
+		default:
+			color.Red("❌ Invalid workflow type. Please enter 'sequential' or 'parallel'.")
+			continue
+		}
+		break
+	}
+
+	// Create crew with current timestamp
+	now := time.Now()
+	crewID := fmt.Sprintf("crew_%d", now.UnixNano())
+	
+	crew := &domain.Crew{
+		ID:          crewID,
+		Name:        crewName,
+		Description: description,
+		CreatedAt:   now,
+		UpdatedAt:   now,
+		Agents:      []string{},
+		Workflow: domain.Workflow{
+			Type:  workflowType,
+			Steps: []domain.WorkflowStep{},
+		},
+	}
+
+	return crew, nil
+}
+
+// addAgentsWizard guide l'utilisateur à travers l'ajout d'agents au crew
+func addAgentsWizard(reader *bufio.Reader, crew *domain.Crew, promptColor, successColor *color.Color) error {
+	promptColor.Println("\n=== Add agents to crew ===")
+	
+	// Charger tous les agents disponibles
+	availableAgents, err := getAgentFilesFromDisk()
+	if err != nil {
+		return fmt.Errorf("erreur lors du chargement des agents: %w", err)
+	}
+	
+	if len(availableAgents) == 0 {
+		return fmt.Errorf("aucun agent trouvé. Veuillez d'abord créer des agents avec 'rlama agent create'")
+	}
+
+	// Afficher les agents disponibles
+	promptColor.Println("\nAvailable agents:")
+	for i, agent := range availableAgents {
+		fmt.Printf("%d. %s (%s)\n", i+1, agent.Name, agent.ID)
+		if agent.Description != "" {
+			fmt.Printf("   Description: %s\n", agent.Description)
+		}
+	}
+
+	// Sélectionner les agents à ajouter
+	promptColor.Println("\nEnter the numbers of agents to add, separated by commas (ex: 1,3,5)")
+	promptColor.Print("Agents to add: ")
+	input, err := reader.ReadString('\n')
+	if err != nil {
+		return err
+	}
+	
+	selectedIndexes := strings.Split(strings.TrimSpace(input), ",")
+	
+	// Ajouter les agents sélectionnés
+	for _, indexStr := range selectedIndexes {
+		indexStr = strings.TrimSpace(indexStr)
+		if indexStr == "" {
+			continue
+		}
+		
+		index, err := strconv.Atoi(indexStr)
+		if err != nil {
+			fmt.Printf("❌ Invalid number: %s, ignored\n", indexStr)
+			continue
+		}
+		
+		if index < 1 || index > len(availableAgents) {
+			fmt.Printf("❌ Out of range: %d, ignored\n", index)
+			continue
+		}
+		
+		agent := availableAgents[index-1]
+		crew.AddAgent(agent.ID)
+		successColor.Printf("✅ Agent added: %s\n", agent.Name)
+	}
+	
+	if len(crew.Agents) == 0 {
+		return fmt.Errorf("no agents added to crew. At least one agent is required")
+	}
+
+	return nil
+}
+
+// configureWorkflowWizard guide l'utilisateur à travers la configuration du workflow
+func configureWorkflowWizard(reader *bufio.Reader, crew *domain.Crew, promptColor, infoColor *color.Color) error {
+	promptColor.Println("\n=== Configure workflow ===")
+	
+	// Si le workflow est séquentiel, demander des détails pour chaque étape
+	if crew.Workflow.Type == "sequential" {
+		promptColor.Println("\nYou are configuring a sequential workflow where agents execute one after another.")
+		
+		// Charger les agents ajoutés pour référence
+		agentMap := make(map[string]*domain.Agent)
+		for _, agentID := range crew.Agents {
+			agent, err := getAgentByID(agentID)
+			if err != nil {
+				return err
+			}
+			agentMap[agentID] = agent
+		}
+		
+		// Afficher les agents disponibles pour le workflow
+		promptColor.Println("\nAvailable agents for the workflow:")
+		for i, agentID := range crew.Agents {
+			agent := agentMap[agentID]
+			fmt.Printf("%d. %s (%s)\n", i+1, agent.Name, agent.ID)
+		}
+		
+		// Configurer chaque étape du workflow
+		for {
+			promptColor.Println("\n--- New workflow step ---")
+			
+			// Sélectionner un agent pour cette étape
+			var agentIndex int
+			for {
+				promptColor.Print("Number of the agent for this step: ")
+				input, err := reader.ReadString('\n')
+				if err != nil {
+					return err
+				}
+				
+				index, err := strconv.Atoi(strings.TrimSpace(input))
+				if err != nil || index < 1 || index > len(crew.Agents) {
+					promptColor.Println("❌ Invalid number. Please enter a number from the list.")
+					continue
+				}
+				
+				agentIndex = index - 1
+				break
+			}
+			
+			// Obtenir les instructions pour cette étape
+			promptColor.Print("Instructions for this agent (empty = use main instruction): ")
+			instructionInput, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			instruction := strings.TrimSpace(instructionInput)
+			
+			// Si ce n'est pas la première étape, demander les dépendances
+			var dependsOn []int
+			if len(crew.Workflow.Steps) > 0 {
+				promptColor.Println("Previous steps:")
+				for i, step := range crew.Workflow.Steps {
+					agent := agentMap[step.AgentID]
+					fmt.Printf("%d. %s\n", i, agent.Name)
+				}
+				
+				promptColor.Print("Dependencies (numbers of steps separated by commas, empty = none): ")
+				depsInput, err := reader.ReadString('\n')
+				if err != nil {
+					return err
+				}
+				
+				if strings.TrimSpace(depsInput) != "" {
+					depIndexes := strings.Split(strings.TrimSpace(depsInput), ",")
+					for _, idxStr := range depIndexes {
+						idx, err := strconv.Atoi(strings.TrimSpace(idxStr))
+						if err == nil && idx >= 0 && idx < len(crew.Workflow.Steps) {
+							dependsOn = append(dependsOn, idx)
+						}
+					}
+				}
+			}
+			
+			// Demander si la sortie doit être passée à l'étape suivante
+			var outputToNext bool
+			promptColor.Print("Pass output to next step? (y/n) [y]: ")
+			outputInput, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			
+			outputStr := strings.TrimSpace(outputInput)
+			if outputStr == "" || strings.ToLower(outputStr) == "y" || strings.ToLower(outputStr) == "yes" {
+				outputToNext = true
+			}
+			
+			// Ajouter l'étape
+			step := domain.WorkflowStep{
+				AgentID:      crew.Agents[agentIndex],
+				Instruction:  instruction,
+				DependsOn:    dependsOn,
+				OutputToNext: outputToNext,
+			}
+			
+			crew.Workflow.Steps = append(crew.Workflow.Steps, step)
+			
+			// Demander s'il faut ajouter une autre étape
+			promptColor.Print("\nAdd another step? (y/n) [n]: ")
+			continueInput, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			
+			continueStr := strings.TrimSpace(continueInput)
+			if continueStr != "y" && continueStr != "yes" {
+				break
+			}
+		}
+	} else if crew.Workflow.Type == "parallel" {
+		// Workflow parallèle
+		promptColor.Println("\nYou are configuring a parallel workflow where all agents execute simultaneously.")
+		
+		// Charger les agents pour référence
+		agentMap := make(map[string]*domain.Agent)
+		for _, agentID := range crew.Agents {
+			agent, err := getAgentByID(agentID)
+			if err != nil {
+				return err
+			}
+			agentMap[agentID] = agent
+		}
+		
+		// Ajouter automatiquement tous les agents au workflow
+		for _, agentID := range crew.Agents {
+			agent := agentMap[agentID]
+			
+			// Pour chaque agent, demander des instructions spécifiques
+			promptColor.Printf("\nInstructions for the agent %s (empty = use main instruction): ", agent.Name)
+			instructionInput, err := reader.ReadString('\n')
+			if err != nil {
+				return err
+			}
+			instruction := strings.TrimSpace(instructionInput)
+			
+			// Ajouter l'étape
+			step := domain.WorkflowStep{
+				AgentID:     agentID,
+				Instruction: instruction,
+				DependsOn:   []int{}, // Pas de dépendances dans un workflow parallèle
+			}
+			
+			crew.Workflow.Steps = append(crew.Workflow.Steps, step)
+		}
+	}
+	
+	return nil
+}
+
+// saveCrew sauvegarde le crew dans un fichier JSON
+func saveCrew(crew *domain.Crew) error {
+	// Préparer le dossier agents
+	basePath := filepath.Join(os.Getenv("HOME"), ".rlama", "agents")
+	os.MkdirAll(basePath, 0755)
+	
+	// Chemin du fichier
+	crewPath := filepath.Join(basePath, crew.ID+".json")
+	
+	// Convertir en JSON
+	crewData, err := json.MarshalIndent(crew, "", "  ")
+	if err != nil {
+		return fmt.Errorf("erreur lors de la sérialisation du crew: %w", err)
+	}
+	
+	// Écrire le fichier
+	err = ioutil.WriteFile(crewPath, crewData, 0644)
+	if err != nil {
+		return fmt.Errorf("erreur lors de l'écriture du crew: %w", err)
+	}
+	
+	return nil
+}
+
+func configureAutomation(crew *domain.Crew, watchDir, inputFile string) error {
+	if watchDir != "" {
+		// Configure file watching in RAG settings
+		crew.RAGName = filepath.Base(watchDir)
+		crew.InstructionTemplate = "{INPUT_TEXT}" // Default template
+	}
+	
+	return nil
+}
+
+func processInputFile(crew *domain.Crew, inputFile string) error {
+	// Read and process the input file
+	data, err := ioutil.ReadFile(inputFile)
+	if err != nil {
+		return fmt.Errorf("error reading input file: %w", err)
+	}
+	
+	// Get services from root command
+	ollamaClient := GetOllamaClient()
+	ragService := service.NewRagService(ollamaClient)
+	agentService := service.NewAgentService(ollamaClient, ragService)
+	
+	// Execute the crew with the file content
+	results, err := agentService.RunCrew(crew, string(data))
+	if err != nil {
+		return fmt.Errorf("error executing crew: %w", err)
+	}
+	
+	// Display results
+	color.Green("\nExecution Results:")
+	for agentID, result := range results {
+		agent, _ := agentService.LoadAgent(agentID)
+		agentName := agentID
+		if agent != nil {
+			agentName = agent.Name
+		}
+		
+		color.Cyan("\n=== %s ===", agentName)
+		fmt.Println(result)
+	}
+	
+	return nil
+}
+
 func init() {
-	rootCmd.AddCommand(localWizardCmd) 
+	wizardCmd.Flags().BoolVar(&autoRun, "auto-run", false, "Enable automatic execution on file changes")
+	wizardCmd.Flags().StringVar(&watchDir, "watch-dir", "", "Directory to watch for new files")
+	wizardCmd.Flags().StringVar(&inputFile, "input-file", "", "Process a specific input file")
+	agentCmd.AddCommand(wizardCmd) 
 } 

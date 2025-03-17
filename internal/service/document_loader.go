@@ -678,4 +678,14 @@ func (dl *DocumentLoader) extractContent(path string) (string, error) {
 		}
 		return string(data), nil
 	}
+}
+
+// ChunkFilter defines filtering criteria for retrieving document chunks
+type ChunkFilter struct {
+	Query              string
+	Limit              int
+	DocumentID         string
+	// Adding the missing fields
+	DocumentSubstring  string
+	ShowContent        bool
 } 
