@@ -1,36 +1,37 @@
 #!/bin/bash
 
-# Script d'installation des dépendances pour RLAMA
-# Ce script tente d'installer les outils nécessaires pour l'extraction de texte
+# Installation script for RLAMA dependencies
+# This script attempts to install the necessary tools for text extraction
+# and reranking with BGE
 
-echo "Installation des dépendances pour RLAMA..."
+echo "Installing dependencies for RLAMA..."
 
-# Détection du système d'exploitation
+# Operating system detection
 OS=$(uname -s)
-echo "Système d'exploitation détecté: $OS"
+echo "Detected operating system: $OS"
 
-# Fonction pour vérifier si un programme est installé
+# Function to check if a program is installed
 is_installed() {
   command -v "$1" >/dev/null 2>&1
 }
 
 # macOS
 if [ "$OS" = "Darwin" ]; then
-  echo "Installation des dépendances pour macOS..."
+  echo "Installing dependencies for macOS..."
   
-  # Vérifier si Homebrew est installé
+  # Check if Homebrew is installed
   if ! is_installed brew; then
-    echo "Homebrew non trouvé. Installation de Homebrew..."
+    echo "Homebrew not found. Installing Homebrew..."
     /bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
   fi
   
-  # Installer les outils
-  echo "Installation des outils d'extraction de texte..."
-  brew install poppler  # Pour pdftotext
-  brew install tesseract  # Pour OCR
-  brew install tesseract-lang  # Langues supplémentaires pour Tesseract
+  # Install tools
+  echo "Installing text extraction tools..."
+  brew install poppler  # For pdftotext
+  brew install tesseract  # For OCR
+  brew install tesseract-lang  # Additional languages for Tesseract
   
-  # Python et outils
+  # Python and tools
   if ! is_installed pip3; then
     brew install python
   fi
@@ -39,52 +40,78 @@ if [ "$OS" = "Darwin" ]; then
   
 # Linux
 elif [ "$OS" = "Linux" ]; then
-  echo "Installation des dépendances pour Linux..."
+  echo "Installing dependencies for Linux..."
   
-  # Essayer apt-get (Debian/Ubuntu)
+  # Try apt-get (Debian/Ubuntu)
   if is_installed apt-get; then
-    echo "Gestionnaire de paquets apt-get détecté"
+    echo "Package manager apt-get detected"
     sudo apt-get update
     sudo apt-get install -y poppler-utils tesseract-ocr tesseract-ocr-fra python3-pip
     sudo apt-get install -y catdoc unrtf
   
-  # Essayer yum (CentOS/RHEL)
+  # Try yum (CentOS/RHEL)
   elif is_installed yum; then
-    echo "Gestionnaire de paquets yum détecté"
+    echo "Package manager yum detected"
     sudo yum update
     sudo yum install -y poppler-utils tesseract tesseract-langpack-fra python3-pip
     sudo yum install -y catdoc
   
-  # Essayer pacman (Arch Linux)
+  # Try pacman (Arch Linux)
   elif is_installed pacman; then
-    echo "Gestionnaire de paquets pacman détecté"
+    echo "Package manager pacman detected"
     sudo pacman -Syu
     sudo pacman -S poppler tesseract tesseract-data-fra python-pip
   
-  # Essayer zypper (openSUSE)
+  # Try zypper (openSUSE)
   elif is_installed zypper; then
-    echo "Gestionnaire de paquets zypper détecté"
+    echo "Package manager zypper detected"
     sudo zypper refresh
     sudo zypper install poppler-tools tesseract-ocr python3-pip
   
   else
-    echo "Aucun gestionnaire de paquets connu détecté. Veuillez installer manuellement les dépendances."
+    echo "No known package manager detected. Please install the dependencies manually."
   fi
   
-  # Installer les packages Python
+  # Install Python packages
   pip3 install --user pdfminer.six docx2txt xlsx2csv
 
 # Windows (via WSL)
 elif [[ "$OS" == MINGW* ]] || [[ "$OS" == MSYS* ]] || [[ "$OS" == CYGWIN* ]]; then
-  echo "Système Windows détecté."
-  echo "Il est recommandé d'utiliser WSL (Windows Subsystem for Linux) pour de meilleures performances."
-  echo "Vous pouvez installer les dépendances manuellement:"
-  echo "1. Installez Python: https://www.python.org/downloads/windows/"
-  echo "2. Installez les packages Python: pip install pdfminer.six docx2txt xlsx2csv"
-  echo "3. Pour l'OCR, installez Tesseract: https://github.com/UB-Mannheim/tesseract/wiki"
+  echo "Windows system detected."
+  echo "It is recommended to use WSL (Windows Subsystem for Linux) for better performance."
+  echo "You can install the dependencies manually:"
+  echo "1. Install Python: https://www.python.org/downloads/windows/"
+  echo "2. Install Python packages: pip install pdfminer.six docx2txt xlsx2csv FlagEmbedding torch transformers"
+  echo "3. For OCR, install Tesseract: https://github.com/UB-Mannheim/tesseract/wiki"
+  
+  # Try to install Python packages with pip in Windows
+  if is_installed pip; then
+    echo "Installing Python dependencies on Windows..."
+    pip install --user pdfminer.six docx2txt xlsx2csv
+    pip install --user -U FlagEmbedding torch transformers
+  elif is_installed pip3; then
+    echo "Installing Python dependencies on Windows..."
+    pip3 install --user pdfminer.six docx2txt xlsx2csv
+    pip3 install --user -U FlagEmbedding torch transformers
+  fi
 fi
 
-echo "Installation des dépendances Python..."
-pip3 install --user pdfminer.six docx2txt xlsx2csv
+# Install common Python dependencies
+echo "Installing common Python dependencies..."
+if is_installed pip3; then
+  pip3 install --user pdfminer.six docx2txt xlsx2csv
+  echo "Installing dependencies for BGE reranker..."
+  pip3 install --user -U FlagEmbedding torch transformers
+elif is_installed pip; then
+  pip install --user pdfminer.six docx2txt xlsx2csv
+  echo "Installing dependencies for BGE reranker..."
+  pip install --user -U FlagEmbedding torch transformers
+else
+  echo "⚠️ Pip is not installed. Cannot install Python dependencies."
+  echo "Please install pip then run: pip install -U FlagEmbedding pdfminer.six docx2txt xlsx2csv"
+fi
 
-echo "Installation terminée!" 
+echo "Installation completed!"
+echo ""
+echo "To use the BGE reranker, run: rlama update-reranker [rag-name]"
+echo "This will configure your RAG to use the BAAI/bge-reranker-v2-m3 model for reranking." 

@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -35,96 +36,9 @@ By default, the command asks for confirmation before installing the update.
 Use the --force flag to update without confirmation.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Checking for RLAMA updates...")
-		
-		// Check the latest available version
-		latestRelease, hasUpdates, err := checkForUpdates()
-		if err != nil {
-			return fmt.Errorf("error checking for updates: %w", err)
-		}
-		
-		if !hasUpdates {
-			fmt.Printf("You are already using the latest version of RLAMA (%s).\n", Version)
-			return nil
-		}
-		
-		latestVersion := strings.TrimPrefix(latestRelease.TagName, "v")
-		
-		// Ask for confirmation unless --force is specified
-		if !forceUpdate {
-			fmt.Printf("A new version of RLAMA is available (%s). Do you want to install it? (y/n): ", latestVersion)
-			var response string
-			fmt.Scanln(&response)
-			
-			response = strings.ToLower(strings.TrimSpace(response))
-			if response != "y" && response != "yes" {
-				fmt.Println("Update cancelled.")
-				return nil
-			}
-		}
-		
-		fmt.Printf("Installing RLAMA %s...\n", latestVersion)
-		
-		// Determine which binary to download based on OS and architecture
-		var assetURL string
-		osName := runtime.GOOS
-		archName := runtime.GOARCH
-		assetPattern := fmt.Sprintf("rlama_%s_%s", osName, archName)
-		
-		for _, asset := range latestRelease.Assets {
-			if strings.Contains(asset.Name, assetPattern) {
-				assetURL = asset.BrowserDownloadURL
-				break
-			}
-		}
-		
-		if assetURL == "" {
-			return fmt.Errorf("no binary found for your system (%s_%s)", osName, archName)
-		}
-		
-		// Download the binary
-		execPath, err := os.Executable()
-		if err != nil {
-			return fmt.Errorf("unable to determine executable location: %w", err)
-		}
-		
-		// Create a temporary file for the download
-		tempFile := execPath + ".new"
-		out, err := os.Create(tempFile)
-		if err != nil {
-			return fmt.Errorf("error creating temporary file: %w", err)
-		}
-		defer out.Close()
-		
-		// Download the binary
-		resp, err := http.Get(assetURL)
-		if err != nil {
-			return fmt.Errorf("download error: %w", err)
-		}
-		defer resp.Body.Close()
-		
-		_, err = io.Copy(out, resp.Body)
-		if err != nil {
-			return fmt.Errorf("error writing file: %w", err)
-		}
-		
-		// Make the binary executable
-		err = os.Chmod(tempFile, 0755)
-		if err != nil {
-			return fmt.Errorf("error setting permissions: %w", err)
-		}
-		
-		// Replace the old binary with the new one
-		backupPath := execPath + ".bak"
-		os.Rename(execPath, backupPath) // Backup the old binary
-		err = os.Rename(tempFile, execPath)
-		if err != nil {
-			// In case of error, restore the old binary
-			os.Rename(backupPath, execPath)
-			return fmt.Errorf("error replacing binary: %w", err)
-		}
-		
-		fmt.Printf("RLAMA has been updated to version %s.\n", latestVersion)
-		return nil
+
+		// Use the doUpdate function which properly handles Windows updates
+		return doUpdate("", forceUpdate)
 	},
 }
 
@@ -136,17 +50,17 @@ func checkForUpdates() (*GitHubRelease, bool, error) {
 		return nil, false, err
 	}
 	defer resp.Body.Close()
-	
+
 	// Parse the JSON response
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return nil, false, err
 	}
-	
+
 	// Check if the version is newer
 	latestVersion := strings.TrimPrefix(release.TagName, "v")
 	hasUpdates := latestVersion != Version
-	
+
 	return &release, hasUpdates, nil
 }
 
@@ -224,7 +138,7 @@ func doUpdate(version string, force bool) error {
 
 	// Sous Windows, nous devons utiliser une approche différente
 	if runtime.GOOS == "windows" {
-		return windowsReplaceBinary(execPath, newBinaryPath)
+		return doWindowsUpdate(execPath, newBinaryPath)
 	}
 
 	// Sur les autres plateformes, nous pouvons remplacer directement
@@ -238,35 +152,79 @@ func doUpdate(version string, force bool) error {
 }
 
 // Nouvelle fonction pour gérer la mise à jour sous Windows
-func windowsReplaceBinary(originalPath, newPath string) error {
-	// Créer un script batch pour le remplacement différé
+func doWindowsUpdate(originalPath, newPath string) error {
+	// Create temporary batch script in a location we know exists
+	userProfile := os.Getenv("USERPROFILE")
+	if userProfile == "" {
+		userProfile = os.TempDir()
+	}
+
+	tempDir := filepath.Join(userProfile, "AppData", "Local", "Temp")
+	os.MkdirAll(tempDir, 0755) // Ensure the directory exists
+
+	tempBatchFile := filepath.Join(tempDir, "rlama_update.bat")
+
+	// Simple batch script that waits for the process to end and then replaces the file
 	batchContent := `@echo off
-:wait
-timeout /t 1 >nul
+echo Waiting for RLAMA to close...
+echo Please close any running instances of RLAMA.
+
+:checkprocess
 tasklist /fi "imagename eq rlama.exe" | find "rlama.exe" >nul
-if %errorlevel% equ 0 goto wait
-move /y "%s" "%s"
+if %errorlevel% equ 0 (
+    timeout /t 2 >nul
+    goto checkprocess
+)
+
+echo RLAMA process exited, proceeding with update...
+echo.
+
+set retryCount=0
+:retry
+set /a retryCount+=1
+echo Attempt %retryCount% to replace the binary...
+
+move /y "%s" "%s" >nul 2>&1
+if errorlevel 1 (
+    echo Failed to replace binary, retrying in 3 seconds...
+    if %retryCount% geq 10 (
+        echo Maximum retry attempts exceeded.
+        echo.
+        echo Please manually run this command to complete the update:
+        echo move /y "%s" "%s"
+        echo.
+        echo Or try running Command Prompt as Administrator.
+        echo.
+        pause
+        exit /b 1
+    )
+    timeout /t 3 >nul
+    goto retry
+)
+
+echo.
 echo Update successful!
-start "" "%s"
-exit
+echo RLAMA has been updated to the new version.
+echo.
+pause
 `
-	batchScript := fmt.Sprintf(batchContent, newPath, originalPath, originalPath)
-	
-	// Créer un fichier temporaire pour le script batch
-	tempBatchFile := filepath.Join(os.TempDir(), "rlama_update.bat")
+	batchScript := fmt.Sprintf(batchContent, newPath, originalPath, newPath, originalPath)
+
+	// Write the batch script
 	if err := os.WriteFile(tempBatchFile, []byte(batchScript), 0644); err != nil {
 		return fmt.Errorf("error creating update script: %w", err)
 	}
-	
-	// Exécuter le script en arrière-plan
-	cmd := exec.Command("cmd", "/c", "start", "/min", tempBatchFile)
+
+	// Run the batch script in a new window
+	cmd := exec.Command("cmd", "/c", "start", "RLAMA Update", tempBatchFile)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("error starting update process: %w", err)
 	}
-	
+
 	fmt.Println("Update will complete after you exit the RLAMA application.")
-	fmt.Println("Please close this window and run 'rlama --version' to verify the update.")
-	
+	fmt.Println("Please close all RLAMA windows and processes to complete the update.")
+	fmt.Println("A separate window is now monitoring the update process.")
+
 	return nil
 }
 
@@ -278,43 +236,89 @@ func getLatestVersion() (string, error) {
 		return "", err
 	}
 	defer resp.Body.Close()
-	
+
 	// Parse the JSON response
 	var release GitHubRelease
 	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
 		return "", err
 	}
-	
+
 	// Return the version without the 'v' prefix
 	return strings.TrimPrefix(release.TagName, "v"), nil
 }
 
-// downloadFile télécharge un fichier depuis une URL vers un chemin local
+// downloadFile downloads a file from a URL to a local path
+// with better error handling and retry attempts
 func downloadFile(url string, filepath string) error {
+	// Create an HTTP client with timeout
+	client := &http.Client{
+		Timeout: 120 * time.Second, // 2 minute timeout
+	}
+
 	// Create the file
 	out, err := os.Create(filepath)
 	if err != nil {
-		return err
+		return fmt.Errorf("error creating file: %w", err)
 	}
 	defer out.Close()
 
-	// Get the data
-	resp, err := http.Get(url)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
+	// Maximum retry attempts
+	maxRetries := 3
+	retryDelay := 2 * time.Second
 
-	// Check server response
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("bad status: %s", resp.Status)
+	var lastErr error
+	for i := 0; i < maxRetries; i++ {
+		if i > 0 {
+			fmt.Printf("Retry attempt %d/%d...\n", i+1, maxRetries)
+			time.Sleep(retryDelay)
+			// Increase delay for next retry
+			retryDelay *= 2
+		}
+
+		// Get the data
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		// Add a user agent to avoid some download restrictions
+		req.Header.Set("User-Agent", "rlama-updater/1.0")
+
+		// Send the request
+		resp, err := client.Do(req)
+		if err != nil {
+			lastErr = fmt.Errorf("error downloading file: %w", err)
+			continue
+		}
+		defer resp.Body.Close()
+
+		// Check server response
+		if resp.StatusCode != http.StatusOK {
+			lastErr = fmt.Errorf("bad status: %s", resp.Status)
+			continue
+		}
+
+		// Reset file position
+		out.Seek(0, 0)
+
+		// Create a progress bar if the file is large enough
+		progressReader := io.Reader(resp.Body)
+		if resp.ContentLength > 1024*1024 { // If larger than 1MB
+			fmt.Printf("Downloading update (%d MB)...\n", resp.ContentLength/(1024*1024))
+		}
+
+		// Write the body to file
+		_, err = io.Copy(out, progressReader)
+		if err != nil {
+			lastErr = fmt.Errorf("error saving file: %w", err)
+			continue
+		}
+
+		// Success
+		return nil
 	}
 
-	// Write the body to file
-	_, err = io.Copy(out, resp.Body)
-	if err != nil {
-		return err
-	}
-
-	return nil
-} 
+	// If we get here, all retries failed
+	return fmt.Errorf("download failed after %d attempts: %w", maxRetries, lastErr)
+}

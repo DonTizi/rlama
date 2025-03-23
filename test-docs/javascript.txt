@@ -1,0 +1,1 @@
+JavaScript runs in web browsers and powers interactive websites. It's essential for frontend development.

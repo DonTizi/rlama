@@ -3,9 +3,9 @@ package cmd
 import (
 	"fmt"
 
-	"github.com/spf13/cobra"
-	"github.com/dontizi/rlama/internal/repository"
 	"github.com/dontizi/rlama/internal/client"
+	"github.com/dontizi/rlama/internal/repository"
+	"github.com/spf13/cobra"
 )
 
 var updateModelCmd = &cobra.Command{
@@ -23,24 +23,24 @@ recreate the RAG with the new model instead.`,
 
 		// Get Ollama client from root command
 		ollamaClient := GetOllamaClient()
-		
+
 		// Check if this is a Hugging Face model
 		if client.IsHuggingFaceModel(newModel) {
 			// Extract model name and quantization
 			hfModelName := client.GetHuggingFaceModelName(newModel)
 			quantization := client.GetQuantizationFromModelRef(newModel)
-			
+
 			fmt.Printf("Detected Hugging Face model. Pulling %s", hfModelName)
 			if quantization != "" {
 				fmt.Printf(" with quantization %s", quantization)
 			}
 			fmt.Println("...")
-			
+
 			// Pull the model from Hugging Face
 			if err := ollamaClient.PullHuggingFaceModel(hfModelName, quantization); err != nil {
 				return fmt.Errorf("error pulling Hugging Face model: %w", err)
 			}
-			
+
 			fmt.Println("Successfully pulled Hugging Face model.")
 		} else {
 			// For regular Ollama models
@@ -65,14 +65,29 @@ recreate the RAG with the new model instead.`,
 			return fmt.Errorf("error saving the RAG: %w", err)
 		}
 
-		fmt.Printf("Successfully updated RAG '%s' model from '%s' to '%s'.\n", 
+		fmt.Printf("Successfully updated RAG '%s' model from '%s' to '%s'.\n",
 			ragName, oldModel, newModel)
 		fmt.Println("Note: Embeddings have not been regenerated. For optimal results, consider recreating the RAG.")
-		
+
+		// Check if the profile exists if specified
+		if updateModelProfileName != "" {
+			profileRepo := repository.NewProfileRepository()
+			if !profileRepo.Exists(updateModelProfileName) {
+				return fmt.Errorf("profile '%s' does not exist", updateModelProfileName)
+			}
+
+			// Update the profile in the RAG
+			rag.APIProfileName = updateModelProfileName
+			fmt.Printf("Using profile '%s' for model '%s'\n", updateModelProfileName, newModel)
+		}
+
 		return nil
 	},
 }
 
+var updateModelProfileName string
+
 func init() {
 	rootCmd.AddCommand(updateModelCmd)
+	updateModelCmd.Flags().StringVar(&updateModelProfileName, "profile", "", "API profile to use for this model")
 }

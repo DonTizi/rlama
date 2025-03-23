@@ -55,6 +55,7 @@ RLAMA is a powerful AI-driven question-answering tool for your documents, seamle
 - [Uninstallation](#uninstallation)
 - [Supported Document Formats](#supported-document-formats)
 - [Troubleshooting](#troubleshooting)
+- [Using OpenAI Models](#using-openai-models)
 
 ## Vision & Roadmap
 RLAMA aims to become the definitive tool for creating local RAG systems that work seamlessly for everyone—from individual developers to large enterprises. Here's our strategic roadmap:
@@ -62,7 +63,7 @@ RLAMA aims to become the definitive tool for creating local RAG systems that wor
 ### Completed Features ✅
 - ✅ **Basic RAG System Creation**: CLI tool for creating and managing RAG systems
 - ✅ **Document Processing**: Support for multiple document formats (.txt, .md, .pdf, etc.)
-- ✅ **Document Chunking**: Basic text splitting with configurable size and overlap
+- ✅ **Document Chunking**: Advanced semantic chunking with multiple strategies (fixed, semantic, hierarchical, hybrid)
 - ✅ **Vector Storage**: Local storage of document embeddings
 - ✅ **Context Retrieval**: Basic semantic search with configurable context size
 - ✅ **Ollama Integration**: Seamless connection to Ollama models
@@ -75,8 +76,8 @@ RLAMA aims to become the definitive tool for creating local RAG systems that wor
 
 ### Small LLM Optimization (Q2 2025)
 - [ ] **Prompt Compression**: Smart context summarization for limited context windows
-- [ ] **Adaptive Chunking**: Dynamic content segmentation based on semantic boundaries
-- [ ] **Minimal Context Retrieval**: Intelligent filtering to eliminate redundant content
+- ✅ **Adaptive Chunking**: Dynamic content segmentation based on semantic boundaries and document structure
+- ✅ **Minimal Context Retrieval**: Intelligent filtering to eliminate redundant content
 - [ ] **Parameter Optimization**: Fine-tuned settings for different model sizes
 
 ### Advanced Embedding Pipeline (Q2-Q3 2025)
@@ -201,6 +202,25 @@ These flags can be used with any command:
 --port string   Ollama port (default: 11434)
 ```
 
+### Custom Data Directory
+
+RLAMA stores data in `~/.rlama` by default. To use a different location:
+
+1. **Command-line flag** (highest priority):
+   ```bash
+   # Use with any command
+   rlama --data-dir /path/to/custom/directory run my-rag
+   ```
+
+2. **Environment variable**:
+   ```bash
+   # Set the environment variable
+   export RLAMA_DATA_DIR=/path/to/custom/directory
+   rlama run my-rag
+   ```
+
+The precedence order is: command-line flag > environment variable > default location.
+
 ### rag - Create a RAG system
 
 Creates a new RAG system by indexing all documents in the specified folder.
@@ -246,6 +266,22 @@ rlama crawl-rag [model] [rag-name] [website-url]
 - `--exclude-path`: Paths to exclude from crawling (comma-separated)
 - `--chunk-size`: Character count per chunk (default: 1000)
 - `--chunk-overlap`: Overlap between chunks in characters (default: 200)
+- `--chunking-strategy`: Chunking strategy to use (options: "fixed", "semantic", "hybrid", "hierarchical", default: "hybrid")
+
+#### Chunking Strategies
+
+RLAMA offers multiple advanced chunking strategies to optimize document retrieval:
+
+- **Fixed**: Traditional chunking with fixed size and overlap, respecting sentence boundaries when possible.
+- **Semantic**: Intelligently splits documents based on semantic boundaries like headings, paragraphs, and natural topic shifts.
+- **Hybrid**: Automatically selects the best strategy based on document type and content (markdown, HTML, code, or plain text).
+- **Hierarchical**: For very long documents, creates a two-level chunking structure with major sections and sub-chunks.
+
+The system automatically adapts to different document types:
+- Markdown documents: Split by headers and sections
+- HTML documents: Split by semantic HTML elements
+- Code documents: Split by functions, classes, and logical blocks
+- Plain text: Split by paragraphs with contextual overlap
 
 **Example:**
 
@@ -255,6 +291,12 @@ rlama crawl-rag llama3 docs-rag https://docs.example.com
 
 # Customize crawling behavior
 rlama crawl-rag llama3 blog-rag https://blog.example.com --max-depth=3 --exclude-path=/archive,/tags
+
+# Create a RAG with semantic chunking
+rlama rag llama3 documentation ./docs --chunking-strategy=semantic
+
+# Use hierarchical chunking for large documents
+rlama rag llama3 book-rag ./books --chunking-strategy=hierarchical
 ```
 
 ### wizard - Create a RAG system with interactive setup
@@ -1002,3 +1044,78 @@ rlama rag hf.co/bartowski/Llama-3.2-1B-Instruct-GGUF my-rag ./docs
 # Use specific quantization
 rlama rag hf.co/mlabonne/Meta-Llama-3.1-8B-Instruct-abliterated-GGUF:Q5_K_M my-rag ./docs
 ```
+
+## Using OpenAI Models
+
+RLAMA now supports using OpenAI models for inference while keeping Ollama for embeddings:
+
+1. Set your OpenAI API key:
+   ```bash
+   export OPENAI_API_KEY="your-api-key"
+   ```
+
+2. Create a RAG system with an OpenAI model:
+   ```bash
+   rlama rag gpt-4-turbo my-rag ./documents
+   ```
+
+3. Run your RAG as usual:
+   ```bash
+   rlama run my-rag
+   ```
+
+Supported OpenAI models include:
+- o3-mini
+- gpt-4o and more...
+
+Note: Only inference uses OpenAI API. Document embeddings still use Ollama for processing.
+
+## Managing API Profiles
+
+RLAMA allows you to create API profiles to manage multiple API keys for different providers:
+
+### Creating a Profile
+
+```bash
+# Create a profile for your OpenAI account
+rlama profile add openai-work openai "sk-your-api-key"
+
+# Create another profile for a different account
+rlama profile add openai-personal openai "sk-your-personal-api-key" 
+```
+
+### Listing Profiles
+
+```bash
+# View all available profiles
+rlama profile list
+```
+
+### Deleting a Profile
+
+```bash
+# Delete a profile
+rlama profile delete openai-old
+```
+
+### Using Profiles with RAGs
+
+When creating a new RAG:
+
+```bash
+# Create a RAG with a specific profile
+rlama rag gpt-4 my-rag ./documents --profile openai-work
+```
+
+When updating an existing RAG:
+
+```bash
+# Update a RAG to use a different model and profile
+rlama update-model my-rag gpt-4-turbo --profile openai-personal
+```
+
+Benefits of using profiles:
+- Manage multiple API keys for different projects
+- Easily switch between different accounts
+- Keep API keys secure (stored in ~/.rlama/profiles)
+- Track which profile was used last and when

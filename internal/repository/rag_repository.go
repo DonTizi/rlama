@@ -8,6 +8,7 @@ import (
 
 	"github.com/dontizi/rlama/internal/domain"
 	"github.com/dontizi/rlama/pkg/vector"
+	"github.com/dontizi/rlama/internal/config"
 )
 
 // RagRepository manages the persistence of RAG systems
@@ -17,13 +18,7 @@ type RagRepository struct {
 
 // NewRagRepository creates a new instance of RagRepository
 func NewRagRepository() *RagRepository {
-	// Use ~/.rlama as the default data folder
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		homeDir = "."
-	}
-	
-	basePath := filepath.Join(homeDir, ".rlama")
+	basePath := config.GetDataDir()
 	
 	// Create the folder if it doesn't exist
 	os.MkdirAll(basePath, 0755)

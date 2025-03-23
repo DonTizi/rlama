@@ -2,3 +2,11 @@ documents/
 rlama
 dist/
 .DS_Store
+bin/
+hook-executed.log
+rlama.exe
+*.exe
+tests/
+test-docs/
+go.mod
+go.sum

@@ -7,25 +7,25 @@ import (
 	"time"
 )
 
-// Document représente un document indexé dans le système RAG
+// Document represents a document indexed in the RAG system
 type Document struct {
 	ID          string    `json:"id"`
 	Path        string    `json:"path"`
 	Name        string    `json:"name"`
 	Content     string    `json:"content"`
 	Metadata    string    `json:"metadata"`
-	Embedding   []float32 `json:"-"` // Ne pas sérialiser en JSON
+	Embedding   []float32 `json:"-"` // Do not serialize to JSON
 	CreatedAt   time.Time `json:"created_at"`
 	ContentType string    `json:"content_type"`
 	Size        int64     `json:"size"`
-	URL         string    `json:"url,omitempty"` // URL source pour les documents web
+	URL         string    `json:"url,omitempty"` // Source URL for web documents
 }
 
-// NewDocument crée une nouvelle instance de Document
+// NewDocument creates a new instance of Document
 func NewDocument(path string, content string) *Document {
-	// Nettoyer le contenu extrait
+	// Clean the extracted content
 	cleanedContent := cleanExtractedText(content)
-	
+
 	return &Document{
 		ID:          filepath.Base(path),
 		Path:        path,
@@ -39,38 +39,38 @@ func NewDocument(path string, content string) *Document {
 	}
 }
 
-// cleanExtractedText nettoie le texte extrait pour améliorer sa qualité
+// cleanExtractedText cleans the extracted text to improve its quality
 func cleanExtractedText(text string) string {
-	// Remplacer les séquences de caractères non imprimables par des espaces
+	// Replace non-printable characters with spaces
 	re := regexp.MustCompile(`[\x00-\x09\x0B\x0C\x0E-\x1F\x7F]+`)
 	text = re.ReplaceAllString(text, " ")
-	
-	// Remplacer les séquences de plus de 2 sauts de ligne par 2 sauts de ligne
+
+	// Replace sequences of more than 2 newlines with 2 newlines
 	re = regexp.MustCompile(`\n{3,}`)
 	text = re.ReplaceAllString(text, "\n\n")
-	
-	// Remplacer les séquences de plus de 2 espaces par 1 espace
+
+	// Replace sequences of more than 2 spaces with 1 space
 	re = regexp.MustCompile(`[ \t]{2,}`)
 	text = re.ReplaceAllString(text, " ")
-	
-	// Supprimer les lignes qui ne contiennent que des caractères spéciaux ou des chiffres
+
+	// Remove lines that contain only special characters or numbers
 	lines := strings.Split(text, "\n")
 	var cleanedLines []string
 	for _, line := range lines {
 		trimmed := strings.TrimSpace(line)
 		if len(trimmed) > 0 {
-			// Vérifier si la ligne contient au moins quelques lettres
+			// Check if the line contains at least some letters
 			re = regexp.MustCompile(`[a-zA-Z]{2,}`)
 			if re.MatchString(trimmed) || len(trimmed) > 20 {
 				cleanedLines = append(cleanedLines, line)
 			}
 		}
 	}
-	
+
 	return strings.Join(cleanedLines, "\n")
 }
 
-// guessContentType essaie de déterminer le type de contenu basé sur l'extension du fichier
+// guessContentType tries to determine the content type based on the file extension
 func guessContentType(path string) string {
 	ext := filepath.Ext(path)
 	switch strings.ToLower(ext) {
@@ -105,4 +105,4 @@ func guessContentType(path string) string {
 	default:
 		return "application/octet-stream"
 	}
-} 
+}

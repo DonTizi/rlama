@@ -9,18 +9,37 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
+	"sync"
 
 	"github.com/dontizi/rlama/internal/domain"
 )
 
 // DocumentLoaderOptions defines filtering options for document loading
 type DocumentLoaderOptions struct {
-	ExcludeDirs    []string 
-	ExcludeExts    []string 
-	ProcessExts    []string 
-	ChunkSize      int      
-	ChunkOverlap   int      // Add this
+	ExcludeDirs      []string
+	ExcludeExts      []string
+	ProcessExts      []string
+	ChunkSize        int
+	ChunkOverlap     int
+	ChunkingStrategy string  // Chunking strategy: "fixed", "semantic", "hybrid", "hierarchical"
+	APIProfileName   string  // Name of the API profile to use
+	EnableReranker   bool    // Whether to enable reranking - now true by default
+	RerankerModel    string  // Model to use for reranking
+	RerankerWeight   float64 // Weight for reranker scores (0-1)
+}
+
+// NewDocumentLoaderOptions creates default document loader options with reranking enabled
+func NewDocumentLoaderOptions() DocumentLoaderOptions {
+	return DocumentLoaderOptions{
+		ChunkSize:        1000,
+		ChunkOverlap:     200,
+		ChunkingStrategy: "hybrid",
+		EnableReranker:   true, // Enable reranking by default
+		RerankerWeight:   0.7,  // 70% reranker, 30% vector
+		RerankerModel:    "",   // Will use the same model as RAG by default
+	}
 }
 
 // DocumentLoader is responsible for loading documents from the file system
@@ -34,50 +53,49 @@ func NewDocumentLoader() *DocumentLoader {
 	return &DocumentLoader{
 		supportedExtensions: map[string]bool{
 			// Plain text
-			".txt":   true,
-			".md":    true,
-			".html":  true,
-			".htm":   true,
-			".json":  true,
-			".csv":   true,
-			".log":   true,
-			".xml":   true,
-			".yaml":  true,
-			".yml":   true,
+			".txt":  true,
+			".md":   true,
+			".html": true,
+			".htm":  true,
+			".json": true,
+			".csv":  true,
+			".log":  true,
+			".xml":  true,
+			".yaml": true,
+			".yml":  true,
 			// Source code
-			".go":    true,
-			".py":    true,
-			".js":    true,
-			".java":  true,
-			".c":     true,
-			".cpp":   true,
-			".cxx":   true,
-			".f":     true,
-			".F":     true,
-			".F90":   true,
-			".h":     true,
-			".rb":    true,
-			".php":   true,
-			".rs":    true,
-			".swift": true,
-			".kt":    true,
-			".el":    true,
-			".svelte":true,
-			".ts":    true,
-			".tsx":   true,
+			".go":     true,
+			".py":     true,
+			".js":     true,
+			".java":   true,
+			".c":      true,
+			".cpp":    true,
+			".cxx":    true,
+			".f":      true,
+			".F":      true,
+			".F90":    true,
+			".h":      true,
+			".rb":     true,
+			".php":    true,
+			".rs":     true,
+			".swift":  true,
+			".kt":     true,
+			".el":     true,
+			".svelte": true,
+			".ts":     true,
+			".tsx":    true,
 			// Documents
-			".pdf":   true,
-			".docx":  true,
-			".doc":   true,
-			".rtf":   true,
-			".odt":   true,
-			".pptx":  true,
-			".ppt":   true,
-			".xlsx":  true,
-			".xls":   true,
-			".epub":  true,
-			".org":   true,
-			
+			".pdf":  true,
+			".docx": true,
+			".doc":  true,
+			".rtf":  true,
+			".odt":  true,
+			".pptx": true,
+			".ppt":  true,
+			".xlsx": true,
+			".xls":  true,
+			".epub": true,
+			".org":  true,
 		},
 		// We'll use pdftotext if available
 		extractorPath: findExternalExtractor(),
@@ -88,7 +106,7 @@ func NewDocumentLoader() *DocumentLoader {
 func findExternalExtractor() string {
 	// Define platform-specific extractors
 	var extractors []string
-	
+
 	if runtime.GOOS == "windows" {
 		// Windows-specific extractors
 		extractors = []string{
@@ -105,7 +123,7 @@ func findExternalExtractor() string {
 			"unrtf",     // For .rtf
 		}
 	}
-	
+
 	for _, extractor := range extractors {
 		path, err := exec.LookPath(extractor)
 		if err == nil {
@@ -159,7 +177,7 @@ func (dl *DocumentLoader) LoadDocumentsFromFolderWithOptions(folderPath string, 
 	} else if err != nil {
 		return nil, fmt.Errorf("unable to access folder '%s': %w", folderPath, err)
 	}
-	
+
 	if !info.IsDir() {
 		return nil, fmt.Errorf("the specified path is not a folder: %s", folderPath)
 	}
@@ -188,7 +206,7 @@ func (dl *DocumentLoader) LoadDocumentsFromFolderWithOptions(folderPath string, 
 		}
 
 		ext := strings.ToLower(filepath.Ext(path))
-		
+
 		// Check if the extension is in the exclude list
 		for _, excludeExt := range options.ExcludeExts {
 			if ext == excludeExt {
@@ -196,7 +214,7 @@ func (dl *DocumentLoader) LoadDocumentsFromFolderWithOptions(folderPath string, 
 				return nil
 			}
 		}
-		
+
 		// If we're only processing specific extensions
 		if len(options.ProcessExts) > 0 {
 			shouldProcess := false
@@ -206,7 +224,7 @@ func (dl *DocumentLoader) LoadDocumentsFromFolderWithOptions(folderPath string, 
 					break
 				}
 			}
-			
+
 			if !shouldProcess {
 				excludedFiles = append(excludedFiles, path)
 				return nil
@@ -230,48 +248,48 @@ func (dl *DocumentLoader) LoadDocumentsFromFolderWithOptions(folderPath string, 
 		if len(unsupportedFiles) == 0 && len(excludedFiles) == 0 {
 			return nil, fmt.Errorf("folder '%s' is empty or contains only hidden files. Please add documents before creating a RAG", folderPath)
 		} else if len(excludedFiles) > 0 {
-			return nil, fmt.Errorf("no supported files found in '%s' after applying exclusion rules. %d unsupported, %d excluded", 
+			return nil, fmt.Errorf("no supported files found in '%s' after applying exclusion rules. %d unsupported, %d excluded",
 				folderPath, len(unsupportedFiles), len(excludedFiles))
 		} else {
 			extensionsMsg := "Supported extensions: "
 			for ext := range dl.supportedExtensions {
 				extensionsMsg += ext + " "
 			}
-			return nil, fmt.Errorf("no supported files found in '%s'. %d unsupported files detected.\n%s", 
+			return nil, fmt.Errorf("no supported files found in '%s'. %d unsupported files detected.\n%s",
 				folderPath, len(unsupportedFiles), extensionsMsg)
 		}
 	}
 
-	fmt.Printf("Found %d supported files, %d unsupported files, and %d excluded files.\n", 
+	fmt.Printf("Found %d supported files, %d unsupported files, and %d excluded files.\n",
 		len(supportedFiles), len(unsupportedFiles), len(excludedFiles))
-	
+
 	// Try to install dependencies if possible
 	dl.tryInstallDependencies()
-	
+
 	// Process supported files
 	for _, path := range supportedFiles {
 		ext := strings.ToLower(filepath.Ext(path))
-		
+
 		// Text extraction using multiple methods
 		textContent, err := dl.extractText(path, ext)
 		if err != nil {
 			fmt.Printf("Warning: unable to extract text from %s: %v\n", path, err)
 			fmt.Println("Attempting extraction as raw text...")
-			
+
 			// Try reading as a text file
 			rawContent, err := ioutil.ReadFile(path)
 			if err != nil {
 				fmt.Printf("Failed to read raw %s: %v\n", path, err)
 				continue
 			}
-			
+
 			textContent = string(rawContent)
 		}
 
 		// Check that the content is not empty
 		if strings.TrimSpace(textContent) == "" {
 			fmt.Printf("Warning: no text extracted from %s\n", path)
-			
+
 			// For PDFs, try one last method
 			if ext == ".pdf" {
 				fmt.Println("Attempting extraction with OCR (if installed)...")
@@ -291,12 +309,12 @@ func (dl *DocumentLoader) LoadDocumentsFromFolderWithOptions(folderPath string, 
 		if err != nil {
 			relPath = path // Fallback to full path if relative path can't be determined
 		}
-		
+
 		// Use relPath for document identification, but keep the full path for file access
 		doc := domain.NewDocument(path, textContent)
 		doc.Name = relPath // Use relative path as the document name for better browsing
 		// Don't change doc.ID or doc.Path which need the absolute path
-		
+
 		documents = append(documents, doc)
 		fmt.Printf("Document added: %s (%d characters)\n", relPath, len(textContent))
 	}
@@ -338,7 +356,7 @@ func (dl *DocumentLoader) extractFromPDF(path string) (string, error) {
 			return string(out), nil
 		}
 	}
-	
+
 	// Method 2: Try with other tools (pdfinfo, pdftk)
 	for _, tool := range []string{"pdfinfo", "pdftk"} {
 		toolPath, err := exec.LookPath(tool)
@@ -354,7 +372,7 @@ func (dl *DocumentLoader) extractFromPDF(path string) (string, error) {
 			}
 		}
 	}
-	
+
 	// Method 3: Last attempt, open as binary file and extract strings
 	fmt.Println("Extracting strings from PDF...")
 	return dl.extractStringsFromBinary(path)
@@ -369,7 +387,7 @@ func (dl *DocumentLoader) extractFromDocument(path string, ext string) (string, 
 			return string(out), nil
 		}
 	}
-	
+
 	// Method 2: Use catdoc for .doc
 	if ext == ".doc" {
 		catdocPath, err := exec.LookPath("catdoc")
@@ -380,7 +398,7 @@ func (dl *DocumentLoader) extractFromDocument(path string, ext string) (string, 
 			}
 		}
 	}
-	
+
 	// Method 3: Use unrtf for .rtf
 	if ext == ".rtf" {
 		unrtfPath, err := exec.LookPath("unrtf")
@@ -391,7 +409,7 @@ func (dl *DocumentLoader) extractFromDocument(path string, ext string) (string, 
 			}
 		}
 	}
-	
+
 	// Method 4: Extract strings
 	return dl.extractStringsFromBinary(path)
 }
@@ -414,7 +432,7 @@ func (dl *DocumentLoader) extractFromSpreadsheet(path string, ext string) (strin
 			}
 		}
 	}
-	
+
 	// Try to use xls2csv for .xls
 	if ext == ".xls" {
 		xls2csvPath, err := exec.LookPath("xls2csv")
@@ -425,7 +443,7 @@ func (dl *DocumentLoader) extractFromSpreadsheet(path string, ext string) (strin
 			}
 		}
 	}
-	
+
 	// Extract strings
 	return dl.extractStringsFromBinary(path)
 }
@@ -440,16 +458,16 @@ func (dl *DocumentLoader) extractStringsFromBinary(path string) (string, error) 
 			return string(out), nil
 		}
 	}
-	
+
 	// Basic implementation of 'strings' in Go
 	data, err := ioutil.ReadFile(path)
 	if err != nil {
 		return "", err
 	}
-	
+
 	var result strings.Builder
 	var currentWord strings.Builder
-	
+
 	for _, b := range data {
 		if (b >= 32 && b <= 126) || b == '\n' || b == '\t' || b == '\r' {
 			currentWord.WriteByte(b)
@@ -461,11 +479,11 @@ func (dl *DocumentLoader) extractStringsFromBinary(path string) (string, error) 
 			currentWord.Reset()
 		}
 	}
-	
+
 	if currentWord.Len() >= 4 {
 		result.WriteString(currentWord.String())
 	}
-	
+
 	return result.String(), nil
 }
 
@@ -476,67 +494,162 @@ func (dl *DocumentLoader) extractWithOCR(path string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("OCR not available: tesseract not found")
 	}
-	
+
 	// Create a temporary output file
 	tempDir, err := ioutil.TempDir("", "rlama-ocr")
 	if err != nil {
 		return "", err
 	}
 	defer os.RemoveAll(tempDir)
-	
-	outBasePath := filepath.Join(tempDir, "out")
-	
+
+	outBaseDir := filepath.Join(tempDir, "out")
+	os.MkdirAll(outBaseDir, 0755)
+
+	// Determine optimal number of workers
+	numWorkers := runtime.NumCPU() + 1
+
 	// For PDFs, first convert to images if possible
 	ext := strings.ToLower(filepath.Ext(path))
 	if ext == ".pdf" {
 		// Check if pdftoppm is available
 		pdftoppmPath, err := exec.LookPath("pdftoppm")
 		if err == nil {
-			// Convert PDF to images
+			// Convert PDF to images with parallel processing
 			fmt.Println("Converting PDF to images for OCR...")
-			cmd := exec.Command(pdftoppmPath, "-png", path, filepath.Join(tempDir, "page"))
-			if err := cmd.Run(); err != nil {
-				return "", fmt.Errorf("failed to convert PDF to images: %w", err)
+
+			// First, determine the number of pages in the PDF
+			pagesCmd := exec.Command("pdfinfo", path)
+			output, err := pagesCmd.CombinedOutput()
+			pageCount := 0
+
+			if err == nil {
+				// Parse page count from pdfinfo output
+				lines := strings.Split(string(output), "\n")
+				for _, line := range lines {
+					if strings.HasPrefix(line, "Pages:") {
+						fmt.Sscanf(strings.TrimSpace(strings.TrimPrefix(line, "Pages:")), "%d", &pageCount)
+						break
+					}
+				}
 			}
-			
-			// OCR on each image
-			var allText strings.Builder
-			imgFiles, _ := filepath.Glob(filepath.Join(tempDir, "page-*.png"))
-			for _, imgFile := range imgFiles {
-				fmt.Printf("OCR on %s...\n", filepath.Base(imgFile))
-				cmd := exec.Command(tesseractPath, imgFile, outBasePath, "-l", "eng")
+
+			if pageCount > 0 && pageCount > numWorkers {
+				// Process PDF in parallel batches
+				fmt.Printf("Processing %d pages with %d workers\n", pageCount, numWorkers)
+				var wg sync.WaitGroup
+				semaphore := make(chan struct{}, numWorkers)
+
+				for i := 1; i <= pageCount; i++ {
+					wg.Add(1)
+					go func(pageNum int) {
+						defer wg.Done()
+						semaphore <- struct{}{}        // Acquire
+						defer func() { <-semaphore }() // Release
+
+						outputPath := filepath.Join(tempDir, fmt.Sprintf("page-%03d", pageNum))
+						batchCmd := exec.Command(pdftoppmPath, "-png", "-f", fmt.Sprintf("%d", pageNum),
+							"-l", fmt.Sprintf("%d", pageNum), path, outputPath)
+						if err := batchCmd.Run(); err != nil {
+							fmt.Printf("Warning: Failed to convert page %d: %v\n", pageNum, err)
+						}
+					}(i)
+				}
+				wg.Wait()
+			} else {
+				// For smaller PDFs or when pdfinfo isn't available, use the original approach
+				cmd := exec.Command(pdftoppmPath, "-png", path, filepath.Join(tempDir, "page"))
 				if err := cmd.Run(); err != nil {
-					fmt.Printf("Warning: OCR failed for %s: %v\n", imgFile, err)
-					continue
+					return "", fmt.Errorf("failed to convert PDF to images: %w", err)
 				}
-				
-				// Read the extracted text
-				textBytes, err := ioutil.ReadFile(outBasePath + ".txt")
-				if err != nil {
-					continue
-				}
-				
-				allText.WriteString(string(textBytes))
-				allText.WriteString("\n\n")
 			}
-			
-			return allText.String(), nil
+
+			// OCR on each image in parallel
+			imgFiles, _ := filepath.Glob(filepath.Join(tempDir, "page-*.png"))
+			return dl.parallelOCR(imgFiles, tesseractPath, outBaseDir, numWorkers)
 		}
 	}
-	
+
 	// Direct OCR on the file (for images)
-	cmd := exec.Command(tesseractPath, path, outBasePath, "-l", "eng")
+	cmd := exec.Command(tesseractPath, path, filepath.Join(outBaseDir, "result"), "-l", "eng")
 	if err := cmd.Run(); err != nil {
 		return "", fmt.Errorf("OCR failed: %w", err)
 	}
-	
+
 	// Read the extracted text
-	textBytes, err := ioutil.ReadFile(outBasePath + ".txt")
+	textBytes, err := ioutil.ReadFile(filepath.Join(outBaseDir, "result.txt"))
 	if err != nil {
 		return "", err
 	}
-	
+
 	return string(textBytes), nil
+}
+
+// parallelOCR processes multiple image files with tesseract in parallel
+func (dl *DocumentLoader) parallelOCR(imgFiles []string, tesseractPath, outBaseDir string, numWorkers int) (string, error) {
+	if len(imgFiles) == 0 {
+		return "", fmt.Errorf("no images found to process")
+	}
+
+	fmt.Printf("Processing %d images with OCR using %d workers\n", len(imgFiles), numWorkers)
+
+	var mutex sync.Mutex
+	results := make(map[string]string)
+	var wg sync.WaitGroup
+	semaphore := make(chan struct{}, numWorkers)
+	var processingErr error
+
+	// Process each image file in parallel
+	for _, imgFile := range imgFiles {
+		wg.Add(1)
+		go func(file string) {
+			defer wg.Done()
+
+			semaphore <- struct{}{}        // Acquire semaphore
+			defer func() { <-semaphore }() // Release semaphore
+
+			baseFileName := filepath.Base(file)
+			outName := strings.TrimSuffix(baseFileName, filepath.Ext(baseFileName))
+			outPath := filepath.Join(outBaseDir, outName)
+
+			fmt.Printf("OCR on %s...\n", baseFileName)
+			cmd := exec.Command(tesseractPath, file, outPath, "-l", "eng")
+			if err := cmd.Run(); err != nil {
+				fmt.Printf("Warning: OCR failed for %s: %v\n", baseFileName, err)
+				return
+			}
+
+			// Read the extracted text
+			textBytes, err := ioutil.ReadFile(outPath + ".txt")
+			if err != nil {
+				fmt.Printf("Warning: Could not read OCR result for %s: %v\n", baseFileName, err)
+				return
+			}
+
+			// Store the result
+			mutex.Lock()
+			results[baseFileName] = string(textBytes)
+			mutex.Unlock()
+		}(imgFile)
+	}
+
+	wg.Wait()
+
+	if processingErr != nil {
+		return "", processingErr
+	}
+
+	// Combine all text in the correct order (by filename)
+	sort.Strings(imgFiles)
+	var allText strings.Builder
+	for _, file := range imgFiles {
+		baseFileName := filepath.Base(file)
+		if text, ok := results[baseFileName]; ok {
+			allText.WriteString(text)
+			allText.WriteString("\n\n")
+		}
+	}
+
+	return allText.String(), nil
 }
 
 // tryInstallDependencies attempts to install dependencies if necessary
@@ -546,7 +659,7 @@ func (dl *DocumentLoader) tryInstallDependencies() {
 	if err != nil {
 		pipPath, err = exec.LookPath("pip")
 	}
-	
+
 	if err == nil {
 		fmt.Println("Checking Python text extraction tools...")
 		// Try to install useful packages
@@ -565,7 +678,7 @@ func (dl *DocumentLoader) tryInstallDependencies() {
 func (dl *DocumentLoader) processContent(path string, content string, options DocumentLoaderOptions) []*domain.DocumentChunk {
 	var chunks []*domain.DocumentChunk
 	runes := []rune(content)
-	
+
 	stepSize := options.ChunkSize - options.ChunkOverlap
 	if stepSize <= 0 {
 		stepSize = options.ChunkSize
@@ -579,7 +692,7 @@ func (dl *DocumentLoader) processContent(path string, content string, options Do
 		if end > len(runes) {
 			end = len(runes)
 		}
-		
+
 		chunk := &domain.DocumentChunk{
 			Content:     string(runes[i:end]),
 			ChunkNumber: chunkIndex,
@@ -645,7 +758,7 @@ import sys
 converter = xlsx2csv.Xlsx2csv(sys.argv[1], skip_empty_lines=True)
 converter.convert(sys.stdout)
 	`, path)
-	
+
 	var output bytes.Buffer
 	cmd.Stdout = &output
 	if err := cmd.Run(); err == nil {
@@ -658,7 +771,7 @@ converter.convert(sys.stdout)
 // extractContent extracts content from a file based on its type
 func (dl *DocumentLoader) extractContent(path string) (string, error) {
 	ext := strings.ToLower(filepath.Ext(path))
-	
+
 	switch ext {
 	case ".csv":
 		return dl.extractCSVContent(path)
@@ -682,10 +795,28 @@ func (dl *DocumentLoader) extractContent(path string) (string, error) {
 
 // ChunkFilter defines filtering criteria for retrieving document chunks
 type ChunkFilter struct {
-	Query              string
-	Limit              int
-	DocumentID         string
+	Query      string
+	Limit      int
+	DocumentID string
 	// Adding the missing fields
-	DocumentSubstring  string
-	ShowContent        bool
-} 
+	DocumentSubstring string
+	ShowContent       bool
+}
+
+// CreateRagWithOptions creates a new RAG with the specified options
+func (dl *DocumentLoader) CreateRagWithOptions(options DocumentLoaderOptions) (*domain.RagSystem, error) {
+	documents, err := dl.LoadDocumentsFromFolderWithOptions("", options)
+	if err != nil {
+		return nil, err
+	}
+
+	rag := &domain.RagSystem{
+		Documents: documents,
+	}
+
+	if options.APIProfileName != "" {
+		rag.APIProfileName = options.APIProfileName
+	}
+
+	return rag, nil
+}

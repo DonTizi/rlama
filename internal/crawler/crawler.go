@@ -16,31 +16,34 @@ import (
 // WebCrawler manage web crawling operations
 type WebCrawler struct {
 	client       *http.Client
-	visitedURLs  map[string]bool
+	baseURL      *url.URL
 	maxDepth     int
 	concurrency  int
-	baseURL      *url.URL
 	excludePaths []string
-	mutex        sync.Mutex
+	visited      map[string]bool
+	visitedMutex sync.Mutex
+	useSitemap   bool     // Option to use sitemap
+	singleURL    bool     // Option to crawl only the specified URL
+	urlsList     []string // Custom list of URLs to crawl
 }
 
-// NewWebCrawler creates a new web crawler instance
-func NewWebCrawler(baseURLStr string, maxDepth, concurrency int, excludePaths []string) (*WebCrawler, error) {
-	baseURL, err := url.Parse(baseURLStr)
+// NewWebCrawler creates a new web crawler
+func NewWebCrawler(urlStr string, maxDepth, concurrency int, excludePaths []string) (*WebCrawler, error) {
+	baseURL, err := url.Parse(urlStr)
 	if err != nil {
 		return nil, fmt.Errorf("invalid base URL: %w", err)
 	}
 
 	return &WebCrawler{
-		client: &http.Client{
-			Timeout: 30 * time.Second,
-		},
-		visitedURLs:  make(map[string]bool),
+		client:       &http.Client{Timeout: 30 * time.Second},
+		baseURL:      baseURL,
 		maxDepth:     maxDepth,
 		concurrency:  concurrency,
-		baseURL:      baseURL,
 		excludePaths: excludePaths,
-		mutex:        sync.Mutex{},
+		visited:      make(map[string]bool),
+		useSitemap:   true,  // By default, use sitemap if available
+		singleURL:    false, // By default, do normal crawling
+		urlsList:     nil,   // By default, no custom list
 	}, nil
 }
 
@@ -48,292 +51,442 @@ func NewWebCrawler(baseURLStr string, maxDepth, concurrency int, excludePaths []
 func isWebContent(urlStr string) bool {
 	// Extensions to ignore (binary files, etc.)
 	excludeExtensions := []string{
-		".zip", ".rar", ".tar", ".gz", ".pdf", ".doc", ".docx", 
-		".xls", ".xlsx", ".ppt", ".pptx", ".exe", ".bin", 
-		".dmg", ".iso", ".img", ".apk", ".ipa", ".mp3", 
+		".zip", ".rar", ".tar", ".gz", ".pdf", ".doc", ".docx",
+		".xls", ".xlsx", ".ppt", ".pptx", ".exe", ".bin",
+		".dmg", ".iso", ".img", ".apk", ".ipa", ".mp3",
 		".mp4", ".avi", ".mov", ".flv", ".mkv",
 	}
-	
+
 	lowerURL := strings.ToLower(urlStr)
 	for _, ext := range excludeExtensions {
 		if strings.HasSuffix(lowerURL, ext) {
 			return false
 		}
 	}
-	
+
 	return true
 }
 
-// CrawlWebsite starts crawling from the base URL and returns processed documents
-func (wc *WebCrawler) CrawlWebsite() ([]*domain.Document, error) {
-	var documents []*domain.Document
-	var wg sync.WaitGroup
-	semaphore := make(chan struct{}, wc.concurrency)
-	resultChan := make(chan *domain.Document, 100)
-	errorChan := make(chan error, 100)
-	doneChan := make(chan struct{})
-
-	// Start crawling with the base URL
-	wg.Add(1)
-	go wc.crawlURL(wc.baseURL.String(), 0, &wg, semaphore, resultChan, errorChan)
-
-	// Collect results
-	go func() {
-		wg.Wait()
-		close(doneChan)
-	}()
-
-	// Process results and errors
-	for {
-		select {
-		case doc := <-resultChan:
-			documents = append(documents, doc)
-		case err := <-errorChan:
-			fmt.Printf("Error during crawling: %v\n", err)
-		case <-doneChan:
-			return documents, nil
-		}
+// CrawlWebsite crawls the website and returns the documents
+func (wc *WebCrawler) CrawlWebsite() ([]domain.Document, error) {
+	// If single URL mode, only crawl the base URL
+	if wc.singleURL {
+		return wc.crawlSingleURL()
 	}
+
+	// If custom list of URLs, use this list
+	if len(wc.urlsList) > 0 {
+		return wc.crawlURLsList()
+	}
+
+	// Otherwise, normal behavior with sitemap or standard crawling
+	// Try to find a sitemap first
+	if wc.useSitemap {
+		sitemapURLs := []string{
+			fmt.Sprintf("%s://%s/sitemap.xml", wc.baseURL.Scheme, wc.baseURL.Host),
+			fmt.Sprintf("%s://%s/sitemap_index.xml", wc.baseURL.Scheme, wc.baseURL.Host),
+		}
+
+		for _, sitemapURL := range sitemapURLs {
+			urls, err := wc.parseSitemap(sitemapURL)
+			if err == nil && len(urls) > 0 {
+				fmt.Printf("Found sitemap at %s with %d URLs\n", sitemapURL, len(urls))
+				return wc.crawlURLsFromSitemap(urls)
+			}
+		}
+		fmt.Println("No sitemap found or error parsing sitemap, falling back to standard crawling")
+	}
+
+	// If no sitemap or option disabled, continue with standard crawling
+	return wc.crawlStandard()
 }
 
-// crawlURL processes a single URL and extracts links to crawl further
-func (wc *WebCrawler) crawlURL(urlStr string, depth int, wg *sync.WaitGroup, semaphore chan struct{}, resultChan chan<- *domain.Document, errorChan chan<- error) {
-	defer wg.Done()
-	
-	// Respect concurrency limit
-	semaphore <- struct{}{}
-	defer func() { <-semaphore }()
+// crawlSingleURL crawls only the base URL without following any links
+func (wc *WebCrawler) crawlSingleURL() ([]domain.Document, error) {
+	fmt.Println("Single URL mode: crawling only the specified URL without following links")
 
-	// First check if this is web content we want to process
-	if !isWebContent(urlStr) {
-		return // Skip non-web content
-	}
+	var documents []domain.Document
 
-	// Check if we've reached max depth
-	if depth > wc.maxDepth {
-		return
-	}
-
-	// Normalize URL
-	parsedURL, err := url.Parse(urlStr)
+	// Fetch and parse the single URL
+	doc, err := wc.fetchAndParseURL(wc.baseURL.String())
 	if err != nil {
-		errorChan <- fmt.Errorf("error parsing URL %s: %w", urlStr, err)
-		return
+		return nil, fmt.Errorf("error fetching single URL %s: %w", wc.baseURL.String(), err)
 	}
 
-	// Make URL absolute if it's relative
-	if !parsedURL.IsAbs() {
-		parsedURL = wc.baseURL.ResolveReference(parsedURL)
+	if doc != nil {
+		documents = append(documents, *doc)
 	}
 
-	// Skip URLs from different domains
-	if parsedURL.Host != wc.baseURL.Host {
-		return
-	}
+	return documents, nil
+}
 
-	// Skip excluded paths
-	for _, excludePath := range wc.excludePaths {
-		if strings.HasPrefix(parsedURL.Path, excludePath) {
-			return
+// crawlURLsList crawls the specific list of URLs provided by the user
+func (wc *WebCrawler) crawlURLsList() ([]domain.Document, error) {
+	fmt.Printf("URLs list mode: crawling %d specific URLs\n", len(wc.urlsList))
+
+	var documents []domain.Document
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	semaphore := make(chan struct{}, wc.concurrency)
+	errorChan := make(chan error, len(wc.urlsList))
+
+	for _, urlStr := range wc.urlsList {
+		// Check if the URL should be excluded
+		shouldExclude := false
+		for _, exclude := range wc.excludePaths {
+			if strings.Contains(urlStr, exclude) {
+				shouldExclude = true
+				break
+			}
 		}
+
+		if shouldExclude {
+			continue
+		}
+
+		wg.Add(1)
+		semaphore <- struct{}{}
+
+		go func(url string) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+
+			// Use the existing URL crawling function
+			doc, err := wc.fetchAndParseURL(url)
+			if err != nil {
+				errorChan <- err
+				return
+			}
+
+			if doc != nil {
+				mu.Lock()
+				documents = append(documents, *doc)
+				mu.Unlock()
+			}
+		}(urlStr)
 	}
 
-	// Skip URL fragments
-	parsedURL.Fragment = ""
-	urlStr = parsedURL.String()
+	wg.Wait()
+	close(errorChan)
 
-	// Skip if we've already visited this URL
-	wc.mutex.Lock()
-	if wc.visitedURLs[urlStr] {
-		wc.mutex.Unlock()
-		return
+	// Log any errors but continue with the documents we have
+	for err := range errorChan {
+		fmt.Printf("Warning during crawling: %v\n", err)
 	}
-	wc.visitedURLs[urlStr] = true
-	wc.mutex.Unlock()
 
-	// Fetch the page
-	fmt.Printf("Crawling: %s\n", urlStr)
+	return documents, nil
+}
+
+// crawlStandard performs the standard crawling
+func (wc *WebCrawler) crawlStandard() ([]domain.Document, error) {
+	var documents []domain.Document
+	visited := make(map[string]bool)
+	queue := []string{wc.baseURL.String()}
+
+	for len(queue) > 0 && len(visited) <= wc.maxDepth*100 {
+		url := queue[0]
+		queue = queue[1:]
+
+		if visited[url] {
+			continue
+		}
+		visited[url] = true
+
+		doc, err := wc.fetchAndParseURL(url)
+		if err != nil {
+			fmt.Printf("Warning: Error fetching %s: %v\n", url, err)
+			continue
+		}
+
+		if doc != nil {
+			documents = append(documents, *doc)
+		}
+
+		// Don't crawl deeper if we've reached the maximum depth
+		urlDepth := strings.Count(url[len(wc.baseURL.String()):], "/")
+		if urlDepth >= wc.maxDepth {
+			continue
+		}
+
+		// Find the links on the page
+		links, err := wc.extractLinks(url)
+		if err != nil {
+			fmt.Printf("Warning: Error extracting links from %s: %v\n", url, err)
+			continue
+		}
+
+		queue = append(queue, links...)
+	}
+
+	return documents, nil
+}
+
+// extractLinks gets all valid links from a page
+func (wc *WebCrawler) extractLinks(urlStr string) ([]string, error) {
 	resp, err := wc.client.Get(urlStr)
 	if err != nil {
-		errorChan <- fmt.Errorf("error fetching %s: %w", urlStr, err)
-		return
+		return nil, err
 	}
 	defer resp.Body.Close()
 
-	// Vérifier le Content-Type de la réponse
-	contentType := resp.Header.Get("Content-Type")
-	if !strings.Contains(contentType, "text/html") && 
-	   !strings.Contains(contentType, "text/plain") && 
-	   !strings.Contains(contentType, "application/xhtml+xml") {
-		// Ignorer les types de contenu qui ne sont pas du texte ou HTML
-		return
-	}
-
-	// Check response status
-	if resp.StatusCode != http.StatusOK {
-		errorChan <- fmt.Errorf("received non-OK status code for %s: %d", urlStr, resp.StatusCode)
-		return
-	}
-
-	// Handle character encoding
-	utf8Reader, err := charset.NewReader(resp.Body, resp.Header.Get("Content-Type"))
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
 	if err != nil {
-		errorChan <- fmt.Errorf("error converting encoding for %s: %w", urlStr, err)
-		return
+		return nil, err
 	}
 
-	// Load the HTML document
-	doc, err := goquery.NewDocumentFromReader(utf8Reader)
-	if err != nil {
-		errorChan <- fmt.Errorf("error parsing HTML for %s: %w", urlStr, err)
-		return
-	}
-
-	// Get page title
-	title := doc.Find("title").Text()
-	if title == "" {
-		title = parsedURL.Path
-	}
-
-	// Extract page content and convert to Markdown
-	markdown, err := extractContentAsMarkdown(doc)
-	if err != nil {
-		errorChan <- fmt.Errorf("error extracting content from %s: %w", urlStr, err)
-		return
-	}
-
-	// Create a document
-	document := domain.NewDocument(urlStr, markdown)
-	document.Name = title
-	document.ContentType = "text/markdown"
-	
-	resultChan <- document
-
-	// Find links and queue them for crawling
-	doc.Find("a[href]").Each(func(_ int, s *goquery.Selection) {
+	var links []string
+	doc.Find("a[href]").Each(func(i int, s *goquery.Selection) {
 		href, exists := s.Attr("href")
-		if !exists || href == "" || strings.HasPrefix(href, "#") {
+		if !exists {
 			return
 		}
 
-		linkURL, err := url.Parse(href)
+		// Convert to absolute URL
+		absURL, err := wc.resolveURL(href)
 		if err != nil {
 			return
 		}
 
-		// Handle relative URLs
-		if !linkURL.IsAbs() {
-			linkURL = parsedURL.ResolveReference(linkURL)
-		}
-
-		// Only follow links on the same domain and that are web content
-		if linkURL.Host != wc.baseURL.Host || !isWebContent(linkURL.String()) {
+		// Check if the URL is on the same domain
+		if !wc.isSameDomain(absURL) {
 			return
 		}
 
-		// Remove fragments
-		linkURL.Fragment = ""
-		nextURL := linkURL.String()
-
-		// Avoid crawling the same URL twice
-		wc.mutex.Lock()
-		alreadyVisited := wc.visitedURLs[nextURL]
-		wc.mutex.Unlock()
-
-		if !alreadyVisited {
-			wg.Add(1)
-			go wc.crawlURL(nextURL, depth+1, wg, semaphore, resultChan, errorChan)
+		// Check the exclusions
+		for _, exclude := range wc.excludePaths {
+			if strings.Contains(absURL, exclude) {
+				return
+			}
 		}
+
+		links = append(links, absURL)
 	})
+
+	return links, nil
+}
+
+// resolveURL converts a relative URL to absolute
+func (wc *WebCrawler) resolveURL(href string) (string, error) {
+	relURL, err := url.Parse(href)
+	if err != nil {
+		return "", err
+	}
+	absURL := wc.baseURL.ResolveReference(relURL)
+	return absURL.String(), nil
+}
+
+// isSameDomain checks if a URL is on the same domain as the base URL
+func (wc *WebCrawler) isSameDomain(urlStr string) bool {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return false
+	}
+	return parsedURL.Host == wc.baseURL.Host
+}
+
+// convertToMarkdown converts HTML content to Markdown
+func (wc *WebCrawler) convertToMarkdown(doc *goquery.Document) string {
+	// Remove unwanted elements
+	doc.Find("script, style, noscript, iframe, svg").Remove()
+
+	// Get the main content
+	var content string
+	mainContent := doc.Find("main, article, .content, #content, .main, #main").First()
+	if mainContent.Length() > 0 {
+		content = mainContent.Text()
+	} else {
+		content = doc.Find("body").Text()
+	}
+
+	// Basic cleanup
+	content = strings.TrimSpace(content)
+	content = strings.ReplaceAll(content, "\n\n\n", "\n\n")
+
+	return content
+}
+
+// fetchAndParseURL fetches and parses a single URL
+func (wc *WebCrawler) fetchAndParseURL(urlStr string) (*domain.Document, error) {
+	fmt.Printf("Crawling: %s\n", urlStr)
+	resp, err := wc.client.Get(urlStr)
+	if err != nil {
+		return nil, fmt.Errorf("error fetching %s: %w", urlStr, err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("received status code %d for %s", resp.StatusCode, urlStr)
+	}
+
+	contentType := resp.Header.Get("Content-Type")
+	if !strings.Contains(contentType, "text/html") &&
+		!strings.Contains(contentType, "text/plain") &&
+		!strings.Contains(contentType, "application/xhtml+xml") {
+		return nil, nil
+	}
+
+	reader, err := charset.NewReader(resp.Body, contentType)
+	if err != nil {
+		return nil, fmt.Errorf("error creating reader: %w", err)
+	}
+
+	doc, err := goquery.NewDocumentFromReader(reader)
+	if err != nil {
+		return nil, fmt.Errorf("error parsing HTML: %w", err)
+	}
+
+	title := doc.Find("title").Text()
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = doc.Find("h1").First().Text()
+		title = strings.TrimSpace(title)
+	}
+	if title == "" {
+		title = urlStr
+	}
+
+	// Use convertToMarkdown instead of extractMarkdownFromHTML
+	content := wc.convertToMarkdown(doc)
+
+	document := &domain.Document{
+		URL:     urlStr,
+		Path:    wc.getRelativePath(urlStr),
+		Content: fmt.Sprintf("# %s\n\n%s", title, content),
+	}
+
+	return document, nil
+}
+
+// getRelativePath returns the relative path of a URL to the base URL
+func (wc *WebCrawler) getRelativePath(urlStr string) string {
+	parsedURL, err := url.Parse(urlStr)
+	if err != nil {
+		return ""
+	}
+
+	if parsedURL.Host == wc.baseURL.Host {
+		return parsedURL.Path
+	}
+	return ""
 }
 
 // extractContentAsMarkdown extracts main content from an HTML document and converts it to Markdown
 func extractContentAsMarkdown(doc *goquery.Document) (string, error) {
-	// Remove unwanted elements
-	doc.Find("script, style, nav, footer, header, aside, .ads, .comments, .navigation").Remove()
+	// Create a Crawl4AI style converter
+	converter := NewCrawl4AIStyleConverter()
 
-	// Extract the main content (prefer main content areas)
-	var contentNode *goquery.Selection
-	
-	// Try to find the main content area using common selectors
-	contentSelectors := []string{"main", "article", ".content", "#content", ".post-content", ".article-content"}
-	for _, selector := range contentSelectors {
-		selection := doc.Find(selector)
-		if selection.Length() > 0 {
-			contentNode = selection
-			break
-		}
-	}
-
-	// If no specific content area found, use the body
-	if contentNode == nil || contentNode.Length() == 0 {
-		contentNode = doc.Find("body")
-	}
-
-	// Get the HTML content
-	html, err := contentNode.Html()
+	// Use the enhanced converter for HTML to Markdown conversion
+	baseURL, _ := url.Parse("")
+	markdown, err := converter.ConvertHTMLToMarkdown(doc, baseURL)
 	if err != nil {
 		return "", err
 	}
 
-	// Convert HTML to Markdown (simplified approach)
-	// In a real implementation, you would use a proper HTML to Markdown converter
-	markdown := convertHTMLToMarkdown(html)
-	
 	return markdown, nil
 }
 
-// convertHTMLToMarkdown is a simplified HTML to Markdown converter
-// In a real implementation, you would use a proper library
-func convertHTMLToMarkdown(html string) string {
-	// Replace common HTML tags with Markdown equivalents
-	replacements := map[string]string{
-		"<h1>":     "# ",
-		"</h1>":    "\n\n",
-		"<h2>":     "## ",
-		"</h2>":    "\n\n",
-		"<h3>":     "### ",
-		"</h3>":    "\n\n",
-		"<h4>":     "#### ",
-		"</h4>":    "\n\n",
-		"<h5>":     "##### ",
-		"</h5>":    "\n\n",
-		"<h6>":     "###### ",
-		"</h6>":    "\n\n",
-		"<p>":      "",
-		"</p>":     "\n\n",
-		"<strong>": "**",
-		"</strong>":"**",
-		"<b>":      "**",
-		"</b>":     "**",
-		"<em>":     "*",
-		"</em>":    "*",
-		"<i>":      "*",
-		"</i>":     "*",
-		"<br>":     "\n",
-		"<br/>":    "\n",
-		"<br />":   "\n",
-		"<ul>":     "\n",
-		"</ul>":    "\n",
-		"<ol>":     "\n",
-		"</ol>":    "\n",
-		"<li>":     "- ",
-		"</li>":    "\n",
-		"<code>":   "`",
-		"</code>":  "`",
-		"<pre>":    "```\n",
-		"</pre>":   "\n```\n",
+// SetUseSitemap sets whether to use sitemap for crawling
+func (wc *WebCrawler) SetUseSitemap(useSitemap bool) {
+	wc.useSitemap = useSitemap
+}
+
+// SetSingleURLMode sets whether to crawl only the specified URL without following links
+func (wc *WebCrawler) SetSingleURLMode(singleURL bool) {
+	wc.singleURL = singleURL
+}
+
+// SetURLsList sets a custom list of URLs to crawl
+func (wc *WebCrawler) SetURLsList(urlsList []string) {
+	wc.urlsList = urlsList
+}
+
+// parseSitemap parses a sitemap XML and returns the list of URLs
+func (wc *WebCrawler) parseSitemap(sitemapURL string) ([]string, error) {
+	resp, err := wc.client.Get(sitemapURL)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("sitemap request returned status code %d", resp.StatusCode)
 	}
 
-	result := html
-	for tag, replacement := range replacements {
-		result = strings.ReplaceAll(result, tag, replacement)
+	// Use goquery to parse the XML
+	doc, err := goquery.NewDocumentFromReader(resp.Body)
+	if err != nil {
+		return nil, err
 	}
 
-	// Clean up multiple newlines
-	for strings.Contains(result, "\n\n\n") {
-		result = strings.ReplaceAll(result, "\n\n\n", "\n\n")
+	var urls []string
+
+	// Find all <loc> tags in the sitemap
+	doc.Find("url loc").Each(func(i int, s *goquery.Selection) {
+		url := strings.TrimSpace(s.Text())
+		if url != "" {
+			urls = append(urls, url)
+		}
+	})
+
+	return urls, nil
+}
+
+// crawlURLsFromSitemap crawls all URLs found in the sitemap
+func (wc *WebCrawler) crawlURLsFromSitemap(urls []string) ([]domain.Document, error) {
+	var documents []domain.Document
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	semaphore := make(chan struct{}, wc.concurrency)
+	errorChan := make(chan error, len(urls))
+
+	for _, urlStr := range urls {
+		// Check if the URL should be excluded
+		shouldExclude := false
+		for _, exclude := range wc.excludePaths {
+			if strings.Contains(urlStr, exclude) {
+				shouldExclude = true
+				break
+			}
+		}
+
+		if shouldExclude {
+			continue
+		}
+
+		// Mark as visited
+		wc.visitedMutex.Lock()
+		wc.visited[urlStr] = true
+		wc.visitedMutex.Unlock()
+
+		wg.Add(1)
+		semaphore <- struct{}{}
+
+		go func(url string) {
+			defer wg.Done()
+			defer func() { <-semaphore }()
+
+			// Use the existing URL crawling function
+			doc, err := wc.fetchAndParseURL(url)
+			if err != nil {
+				errorChan <- err
+				return
+			}
+
+			if doc != nil {
+				mu.Lock()
+				documents = append(documents, *doc)
+				mu.Unlock()
+			}
+		}(urlStr)
 	}
 
-	return result
+	wg.Wait()
+	close(errorChan)
+
+	// Log any errors but continue with the documents we have
+	for err := range errorChan {
+		fmt.Printf("Warning during crawling: %v\n", err)
+	}
+
+	return documents, nil
 }

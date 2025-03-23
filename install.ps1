@@ -1,8 +1,11 @@
 # Windows installation script for RLAMA
 Write-Host "
-█▀█ █   ▄▀█ █▀▄▀█ ▄▀█
-█▀▄ █▄▄ █▀█ █░▀░█ █▀█
-
+ ____  _       _    __  __    _    
+|  _ \| |     / \  |  \/  |  / \   
+| |_) | |    / _ \ | |\/| | / _ \  
+|  _ <| |___/ ___ \| |  | |/ ___ \ 
+|_| \_\_____/_/   \_\_|  |_/_/   \_\
+                                  
 Retrieval-Augmented Language Model Adapter for Windows
 "
 

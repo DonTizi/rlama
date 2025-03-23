@@ -2,17 +2,16 @@ package cmd
 
 import (
 	"fmt"
-	"net/http"
 	"time"
 
 	"github.com/spf13/cobra"
-	
+
 	"github.com/dontizi/rlama/internal/client"
 	"github.com/dontizi/rlama/internal/service"
 )
 
 const (
-	Version = "0.1.32" // Current version of RLAMA
+	Version = "0.1.34" // Current version of RLAMA
 )
 
 var rootCmd = &cobra.Command{
@@ -39,6 +38,7 @@ var (
 	ollamaHost  string
 	ollamaPort  string
 	verbose     bool
+	dataDir     string
 )
 
 var (
@@ -81,48 +81,40 @@ func GetOllamaClient() *client.OllamaClient {
 	// Si les flags sont définis, ils ont priorité
 	host := ollamaHost
 	port := ollamaPort
-	
+
 	// Sinon, utiliser les valeurs par défaut
 	if host == "" {
 		host = client.DefaultOllamaHost
 	}
-	
-	if port == "" {
-		port = client.DefaultOllamaPort
-	}
-	
-	baseURL := fmt.Sprintf("%s:%s", host, port)
-	
-	return &client.OllamaClient{
-		BaseURL: baseURL,
-		Client: &http.Client{
-			Timeout: 60 * time.Second,
-		},
-	}
+
+	return client.NewOllamaClient(host, port)
 }
 
 func init() {
 	// Add --version flag
 	rootCmd.Flags().BoolVarP(&versionFlag, "version", "v", false, "Display RLAMA version")
-	
+
 	// Add Ollama configuration flags
 	rootCmd.PersistentFlags().StringVar(&ollamaHost, "host", "", "Ollama host (overrides OLLAMA_HOST env var, default: localhost)")
 	rootCmd.PersistentFlags().StringVar(&ollamaPort, "port", "", "Ollama port (overrides port in OLLAMA_HOST env var, default: 11434)")
 	rootCmd.PersistentFlags().BoolVar(&verbose, "verbose", false, "Enable verbose output")
-	
+
+	// New flag for data directory
+	rootCmd.PersistentFlags().StringVar(&dataDir, "data-dir", "", "Custom data directory path")
+
 	// Override the Run function to handle the --version flag
 	rootCmd.Run = func(cmd *cobra.Command, args []string) {
 		if versionFlag {
 			fmt.Printf("RLAMA version %s\n", Version)
 			return
 		}
-		
+
 		// If no arguments are provided and --version is not used, display help
 		if len(args) == 0 {
 			cmd.Help()
 		}
 	}
-	
+
 	// Start the watcher daemon
 	go startFileWatcherDaemon()
 }
@@ -131,12 +123,12 @@ func init() {
 func startFileWatcherDaemon() {
 	// Wait a bit for application initialization
 	time.Sleep(2 * time.Second)
-	
+
 	// Create the services
 	ollamaClient := GetOllamaClient()
 	ragService := service.NewRagService(ollamaClient)
 	fileWatcher := service.NewFileWatcher(ragService)
-	
+
 	// Start the daemon with a 1-minute check interval for its internal operations
 	// Actual RAG check intervals are controlled by each RAG's configuration
 	fileWatcher.StartWatcherDaemon(1 * time.Minute)
@@ -145,13 +137,16 @@ func startFileWatcherDaemon() {
 // Ajouter une fonction pour vérifier la connexion à Ollama
 func checkOllamaConnection() error {
 	client := GetOllamaClient()
-	
-	// Ping simple pour vérifier la connexion
-	err := client.Ping()
+
+	// Check if Ollama is running
+	running, err := client.IsOllamaRunning()
 	if err != nil {
 		return fmt.Errorf("erreur de connexion à Ollama: %w", err)
 	}
-	
+	if !running {
+		return fmt.Errorf("Ollama n'est pas en cours d'exécution")
+	}
+
 	return nil
 }
 
@@ -159,12 +154,12 @@ func checkOllamaConnection() error {
 func checkOllamaConnectionWithTimeout(timeoutSeconds int) error {
 	// Créer un canal pour le résultat
 	resultChan := make(chan error, 1)
-	
+
 	// Lancer la vérification dans une goroutine
 	go func() {
 		resultChan <- checkOllamaConnection()
 	}()
-	
+
 	// Attendre avec un timeout
 	select {
 	case err := <-resultChan:
@@ -172,4 +167,4 @@ func checkOllamaConnectionWithTimeout(timeoutSeconds int) error {
 	case <-time.After(time.Duration(timeoutSeconds) * time.Second):
 		return fmt.Errorf("timeout lors de la vérification de connexion à Ollama")
 	}
-} 
+}
