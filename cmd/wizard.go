@@ -172,6 +172,8 @@ This makes it easy to set up a new RAG without remembering all command options.`
 		var excludePaths []string
 		var useWebCrawler bool
 		var useSitemap bool
+		var crawlSingleURL bool
+		var crawlURLsList []string
 
 		if sourceChoice == "2" {
 			// Website crawler option
@@ -222,6 +224,44 @@ This makes it easy to set up a new RAG without remembering all command options.`
 			err = survey.AskOne(useSitemapPrompt, &useSitemap)
 			if err != nil {
 				return err
+			}
+
+			// Display crawling configuration
+			fmt.Println("\nCrawling configuration:")
+			fmt.Printf("- URL: %s\n", websiteURL)
+			fmt.Printf("- Max depth: %d\n", maxDepth)
+			fmt.Printf("- Concurrency: %d\n", concurrency)
+			if len(excludePaths) > 0 {
+				fmt.Printf("- Excluded paths: %s\n", strings.Join(excludePaths, ", "))
+			}
+			fmt.Printf("- Use sitemap: %t\n", useSitemap)
+			fmt.Printf("- Single URL mode: %t\n", crawlSingleURL)
+			if len(crawlURLsList) > 0 {
+				fmt.Printf("- Specific URLs: %s\n", strings.Join(crawlURLsList, ", "))
+			}
+
+			// Ask if the user wants to use single URL mode
+			useSingleURLPrompt := &survey.Confirm{
+				Message: "Use single URL mode (only crawl the specified URL without following links)?",
+				Default: false,
+			}
+			err = survey.AskOne(useSingleURLPrompt, &crawlSingleURL)
+			if err != nil {
+				return err
+			}
+
+			// Ask for a list of specific URLs to crawl
+			if !crawlSingleURL {
+				fmt.Print("Enter specific URLs to crawl (comma-separated, leave empty to crawl all): ")
+				urlsListStr, _ := reader.ReadString('\n')
+				urlsListStr = strings.TrimSpace(urlsListStr)
+				if urlsListStr != "" {
+					urlsList := strings.Split(urlsListStr, ",")
+					for i := range urlsList {
+						urlsList[i] = strings.TrimSpace(urlsList[i])
+					}
+					crawlURLsList = urlsList
+				}
 			}
 		} else {
 			// Option local folder (existing code)
@@ -316,8 +356,13 @@ This makes it easy to set up a new RAG without remembering all command options.`
 			fmt.Printf("- Source: Website - %s\n", websiteURL)
 			fmt.Printf("- Crawl depth: %d\n", maxDepth)
 			fmt.Printf("- Concurrency: %d\n", concurrency)
+			fmt.Printf("- Use sitemap: %t\n", useSitemap)
+			fmt.Printf("- Single URL mode: %t\n", crawlSingleURL)
 			if len(excludePaths) > 0 {
 				fmt.Printf("- Exclude paths: %s\n", strings.Join(excludePaths, ", "))
+			}
+			if len(crawlURLsList) > 0 {
+				fmt.Printf("- Specific URLs: %s\n", strings.Join(crawlURLsList, ", "))
 			}
 		} else {
 			fmt.Printf("- Source: Local folder - %s\n", folderPath)
@@ -372,8 +417,17 @@ This makes it easy to set up a new RAG without remembering all command options.`
 				return fmt.Errorf("error initializing web crawler: %w", err)
 			}
 
+			// Set the single URL option
+			webCrawler.SetSingleURLMode(crawlSingleURL)
+
 			// Set the sitemap option
 			webCrawler.SetUseSitemap(useSitemap)
+
+			// Set specific URLs list if provided
+			if len(crawlURLsList) > 0 {
+				webCrawler.SetURLsList(crawlURLsList)
+				fmt.Printf("Using list of %d specific URLs for crawling\n", len(crawlURLsList))
+			}
 
 			// Start the crawling
 			documents, err := webCrawler.CrawlWebsite()
@@ -432,6 +486,98 @@ This makes it easy to set up a new RAG without remembering all command options.`
 
 		fmt.Println("\n🎉 RAG created successfully! 🎉")
 		fmt.Printf("\nYou can now use your RAG with: rlama run %s\n", ragName)
+
+		// Ask if the user wants to set up directory watching
+		if !useWebCrawler {
+			// For local folder RAGs, offer directory watching
+			setupDirWatchPrompt := &survey.Confirm{
+				Message: "Do you want to set up directory watching to automatically update the RAG when files change?",
+				Default: false,
+			}
+
+			var setupDirWatch bool
+			if err := survey.AskOne(setupDirWatchPrompt, &setupDirWatch); err == nil && setupDirWatch {
+				// Ask for the interval
+				var watchInterval int
+				intervalPrompt := &survey.Input{
+					Message: "Check interval in minutes (0 = only check when RAG is used):",
+					Default: "60",
+				}
+
+				var intervalStr string
+				if err := survey.AskOne(intervalPrompt, &intervalStr); err == nil {
+					fmt.Sscanf(intervalStr, "%d", &watchInterval)
+
+					// Set up directory watching with appropriate options
+					watchLoaderOptions := service.DocumentLoaderOptions{
+						ExcludeDirs:      excludeDirs,
+						ExcludeExts:      excludeExts,
+						ProcessExts:      processExts,
+						ChunkSize:        chunkSize,
+						ChunkOverlap:     overlap,
+						ChunkingStrategy: chunkingStrategy,
+					}
+
+					// Set up directory watching
+					err := ragService.SetupDirectoryWatching(ragName, folderPath, watchInterval, watchLoaderOptions)
+					if err != nil {
+						fmt.Printf("Warning: Failed to set up directory watching: %v\n", err)
+					} else {
+						if watchInterval == 0 {
+							fmt.Printf("Directory watching set up for '%s'. Directory '%s' will be checked each time the RAG is used.\n",
+								ragName, folderPath)
+						} else {
+							fmt.Printf("Directory watching set up for '%s'. Directory '%s' will be checked every %d minutes.\n",
+								ragName, folderPath, watchInterval)
+						}
+					}
+				}
+			}
+		} else {
+			// For web crawler RAGs, offer web watching
+			setupWebWatchPrompt := &survey.Confirm{
+				Message: "Do you want to set up website watching to automatically update the RAG when website content changes?",
+				Default: false,
+			}
+
+			var setupWebWatch bool
+			if err := survey.AskOne(setupWebWatchPrompt, &setupWebWatch); err == nil && setupWebWatch {
+				// Ask for the interval
+				var watchInterval int
+				intervalPrompt := &survey.Input{
+					Message: "Check interval in minutes (0 = only check when RAG is used):",
+					Default: "60",
+				}
+
+				var intervalStr string
+				if err := survey.AskOne(intervalPrompt, &intervalStr); err == nil {
+					fmt.Sscanf(intervalStr, "%d", &watchInterval)
+
+					// Set up web watching options
+					webWatchOptions := domain.WebWatchOptions{
+						MaxDepth:     maxDepth,
+						Concurrency:  concurrency,
+						ExcludePaths: excludePaths,
+						ChunkSize:    chunkSize,
+						ChunkOverlap: overlap,
+					}
+
+					// Set up web watching
+					err := ragService.SetupWebWatching(ragName, websiteURL, watchInterval, webWatchOptions)
+					if err != nil {
+						fmt.Printf("Warning: Failed to set up website watching: %v\n", err)
+					} else {
+						if watchInterval == 0 {
+							fmt.Printf("Website watching set up for '%s'. Website '%s' will be checked each time the RAG is used.\n",
+								ragName, websiteURL)
+						} else {
+							fmt.Printf("Website watching set up for '%s'. Website '%s' will be checked every %d minutes.\n",
+								ragName, websiteURL, watchInterval)
+						}
+					}
+				}
+			}
+		}
 
 		return nil
 	},
