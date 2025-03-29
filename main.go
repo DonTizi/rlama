@@ -11,11 +11,11 @@ func main() {
 	ollamaClient := client.NewDefaultOllamaClient()
 	ragService := service.NewRagService(ollamaClient)
 	agentService := service.NewAgentService(ollamaClient, ragService)
-	ragService.SetAgentService(agentService)
-	
+	// ragService.SetAgentService(agentService) // Removed circular dependency
+
 	// Rendre ces services accessibles aux commandes
 	cmd.SetServices(ragService, agentService)
-	
+
 	// Execute the root command
 	cmd.Execute()
 }

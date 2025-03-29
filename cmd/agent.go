@@ -46,12 +46,12 @@ Available roles include:
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Début de la création de l'agent...")
-		
+
 		// Vérifier la connexion avec timeout court
 		if err := checkOllamaConnectionWithTimeout(5); err != nil {
 			return fmt.Errorf("erreur de connexion à Ollama: %w", err)
 		}
-		
+
 		agentName := args[0]
 
 		// Obtenir les clients
@@ -82,7 +82,7 @@ Available roles include:
 			if choice <= 0 || choice > len(models) {
 				return fmt.Errorf("invalid model selection")
 			}
-			agentModelName = models[choice-1]
+			agentModelName = models[choice-1].Name
 		}
 
 		// Si la description n'est pas fournie, demander
@@ -110,31 +110,31 @@ var listAgentsCmd = &cobra.Command{
 	Long:  `Display a list of all agents that have been created.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Chargement de la liste des agents...")
-		
+
 		// Recupérer directement les fichiers agents plutôt que d'utiliser le service
 		agentFiles, err := getAgentFilesFromDisk()
 		if err != nil {
 			return fmt.Errorf("erreur lors de la lecture des fichiers agents: %w", err)
 		}
-		
+
 		if len(agentFiles) == 0 {
 			fmt.Println("Aucun agent trouvé.")
 			return nil
 		}
-		
+
 		fmt.Printf("Agents disponibles (%d trouvés):\n\n", len(agentFiles))
-		
+
 		// Utiliser tabwriter pour un affichage aligné
 		w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
 		fmt.Fprintln(w, "ID\tNAME\tROLE\tMODEL\tRAG")
-		
+
 		for _, agent := range agentFiles {
 			fmt.Fprintf(w, "%s\t%s\t%s\t%s\t%s\n",
-				agent.ID, agent.Name, agent.Role, agent.ModelName, 
+				agent.ID, agent.Name, agent.Role, agent.ModelName,
 				defaultString(agent.RAGName, "none"))
 		}
 		w.Flush()
-		
+
 		return nil
 	},
 }
@@ -197,7 +197,7 @@ Example: rlama agent run twitter-writer "Write a tweet about AI"`,
 			instructionInput, _ := scanner.ReadString('\n')
 			instruction = strings.TrimSpace(instructionInput)
 		}
-		
+
 		if instruction == "" {
 			return fmt.Errorf("instruction cannot be empty")
 		}
@@ -316,14 +316,14 @@ var agentCrewAddAgentCmd = &cobra.Command{
 		fmt.Println("Ajout de l'agent au crew (avec timeout)...")
 		crewName := args[0]
 		agentName := args[1]
-		
+
 		// Utiliser un timeout global pour l'opération complète
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		
+
 		// Canal pour recevoir le résultat
 		resultChan := make(chan error, 1)
-		
+
 		go func() {
 			// Charger le crew directement depuis le disque
 			crew, err := getCrewByName(crewName)
@@ -331,43 +331,43 @@ var agentCrewAddAgentCmd = &cobra.Command{
 				resultChan <- fmt.Errorf("erreur lors du chargement du crew: %w", err)
 				return
 			}
-			
+
 			// Charger l'agent directement depuis le disque
 			agent, err := getAgentByName(agentName)
 			if err != nil {
 				resultChan <- fmt.Errorf("erreur lors du chargement de l'agent: %w", err)
 				return
 			}
-			
+
 			// Ajouter l'agent au crew directement
 			if !containsString(crew.Agents, agent.ID) {
 				// Ajouter l'agent s'il n'est pas déjà présent
 				crew.Agents = append(crew.Agents, agent.ID)
-				
+
 				// Sauvegarder le crew modifié
 				basePath := filepath.Join(os.Getenv("HOME"), ".rlama", "agents")
 				crewPath := filepath.Join(basePath, crew.ID+".json")
-				
+
 				// Convertir en JSON
 				crewData, err := json.MarshalIndent(crew, "", "  ")
 				if err != nil {
 					resultChan <- fmt.Errorf("erreur lors de la sérialisation du crew: %w", err)
 					return
 				}
-				
+
 				// Écrire le fichier
 				err = ioutil.WriteFile(crewPath, crewData, 0644)
 				if err != nil {
 					resultChan <- fmt.Errorf("erreur lors de l'écriture du crew: %w", err)
 					return
 				}
-				
+
 				resultChan <- nil
 			} else {
 				resultChan <- fmt.Errorf("l'agent '%s' est déjà dans le crew '%s'", agentName, crewName)
 			}
 		}()
-		
+
 		// Attendre le résultat ou le timeout
 		select {
 		case err := <-resultChan:
@@ -399,10 +399,10 @@ Example: rlama agent crew add-step crew_123 agent_456 --instruction "Analyze thi
 		// Utiliser un timeout global pour l'opération complète
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		
+
 		// Canal pour recevoir le résultat
 		resultChan := make(chan error, 1)
-		
+
 		go func() {
 			// Parse dependsOn
 			var dependsOn []int
@@ -417,21 +417,21 @@ Example: rlama agent crew add-step crew_123 agent_456 --instruction "Analyze thi
 					dependsOn = append(dependsOn, idx)
 				}
 			}
-			
+
 			// Charger le crew directement depuis le disque
 			crew, err := getCrewByID(crewID)
 			if err != nil {
 				resultChan <- fmt.Errorf("erreur lors du chargement du crew: %w", err)
 				return
 			}
-			
+
 			// Vérifier que l'agent existe
 			_, err = getAgentByID(agentID)
 			if err != nil {
 				resultChan <- fmt.Errorf("erreur lors du chargement de l'agent: %w", err)
 				return
 			}
-			
+
 			// Créer et ajouter l'étape directement
 			step := domain.WorkflowStep{
 				AgentID:      agentID,
@@ -439,32 +439,32 @@ Example: rlama agent crew add-step crew_123 agent_456 --instruction "Analyze thi
 				DependsOn:    dependsOn,
 				OutputToNext: outputToNext,
 			}
-			
+
 			// Ajouter l'étape au workflow
 			crew.Workflow.Steps = append(crew.Workflow.Steps, step)
 			crew.UpdatedAt = time.Now()
-			
+
 			// Sauvegarder le crew
 			basePath := filepath.Join(os.Getenv("HOME"), ".rlama", "agents")
 			crewPath := filepath.Join(basePath, crew.ID+".json")
-			
+
 			// Convertir en JSON
 			crewData, err := json.MarshalIndent(crew, "", "  ")
 			if err != nil {
 				resultChan <- fmt.Errorf("erreur lors de la sérialisation du crew: %w", err)
 				return
 			}
-			
+
 			// Écrire le fichier
 			err = ioutil.WriteFile(crewPath, crewData, 0644)
 			if err != nil {
 				resultChan <- fmt.Errorf("erreur lors de l'écriture du crew: %w", err)
 				return
 			}
-			
+
 			resultChan <- nil
 		}()
-		
+
 		// Attendre le résultat ou le timeout
 		select {
 		case err := <-resultChan:
@@ -492,7 +492,7 @@ Example: rlama agent crew run crew_123 "Research quantum computing advancements"
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Println("Exécution du crew (avec timeout)...")
 		crewID := args[0]
-		
+
 		// Construire l'instruction à partir des arguments restants
 		var instruction string
 		if len(args) > 1 {
@@ -504,19 +504,19 @@ Example: rlama agent crew run crew_123 "Research quantum computing advancements"
 			instructionInput, _ := scanner.ReadString('\n')
 			instruction = strings.TrimSpace(instructionInput)
 		}
-		
+
 		if instruction == "" {
 			return fmt.Errorf("instruction cannot be empty")
 		}
-		
+
 		// Utiliser un timeout global plus long pour l'exécution du crew
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 		defer cancel()
-		
+
 		// Canal pour recevoir le résultat
 		resultChan := make(chan string, 1)
 		errChan := make(chan error, 1)
-		
+
 		go func() {
 			// Charger le crew directement
 			crew, err := getCrewByID(crewID)
@@ -524,28 +524,28 @@ Example: rlama agent crew run crew_123 "Research quantum computing advancements"
 				errChan <- fmt.Errorf("erreur lors du chargement du crew: %w", err)
 				return
 			}
-			
+
 			// Vérifier qu'il y a des étapes dans le workflow
 			if len(crew.Workflow.Steps) == 0 {
 				errChan <- fmt.Errorf("le crew n'a pas d'étapes de workflow définies")
 				return
 			}
-			
+
 			// Créer des services temporaires pour l'exécution
 			ollamaClient := GetOllamaClient()
 			ragService := service.NewRagService(ollamaClient)
 			agentService := service.NewAgentService(ollamaClient, ragService)
-			
+
 			// Exécuter le crew avec un contexte de timeout
 			result, err := executeCrewWithTimeout(ctx, crew, instruction, agentService)
 			if err != nil {
 				errChan <- err
 				return
 			}
-			
+
 			resultChan <- result
 		}()
-		
+
 		// Attendre le résultat ou le timeout
 		select {
 		case result := <-resultChan:
@@ -565,34 +565,34 @@ func executeCrewWithTimeout(ctx context.Context, crew *domain.Crew, instruction 
 	// Créer un canal pour timeout interne
 	timeoutCtx, cancel := context.WithTimeout(ctx, 4*time.Minute)
 	defer cancel()
-	
+
 	// Canal pour résultat
 	resultChan := make(chan string, 1)
 	errChan := make(chan error, 1)
-	
+
 	go func() {
 		fmt.Println("Exécution du workflow...")
-		
+
 		if crew.Workflow.Type == "sequential" {
 			// Exécution séquentielle
 			outputs := make(map[int]string)
-			
+
 			for i, step := range crew.Workflow.Steps {
 				fmt.Printf("Étape %d: Exécution de l'agent '%s'...\n", i, step.AgentID)
-				
+
 				// Charger l'agent pour cette étape
 				agent, err := getAgentByID(step.AgentID)
 				if err != nil {
 					errChan <- fmt.Errorf("erreur lors du chargement de l'agent pour l'étape %d: %w", i, err)
 					return
 				}
-				
+
 				// Préparer l'instruction pour cette étape
 				stepInstruction := step.Instruction
 				if stepInstruction == "" {
 					stepInstruction = instruction
 				}
-				
+
 				// Si cette étape dépend d'autres étapes, incorporer leurs sorties
 				if len(step.DependsOn) > 0 {
 					for _, depIndex := range step.DependsOn {
@@ -601,12 +601,12 @@ func executeCrewWithTimeout(ctx context.Context, crew *domain.Crew, instruction 
 						}
 					}
 				}
-				
+
 				// Exécuter l'agent avec un timeout interne
 				agentCtx, agentCancel := context.WithTimeout(timeoutCtx, 60*time.Second)
 				agentResult := make(chan string, 1)
 				agentErr := make(chan error, 1)
-				
+
 				go func() {
 					// Simuler l'exécution d'un agent
 					output, err := agentService.RunAgent(agent, stepInstruction)
@@ -616,7 +616,7 @@ func executeCrewWithTimeout(ctx context.Context, crew *domain.Crew, instruction 
 					}
 					agentResult <- output
 				}()
-				
+
 				// Attendre le résultat de l'agent ou timeout
 				var output string
 				select {
@@ -631,16 +631,16 @@ func executeCrewWithTimeout(ctx context.Context, crew *domain.Crew, instruction 
 					errChan <- fmt.Errorf("timeout lors de l'exécution de l'agent à l'étape %d", i)
 					return
 				}
-				
+
 				// Enregistrer le résultat pour les étapes futures
 				outputs[i] = output
-				
+
 				// Si c'est la dernière étape ou si outputToNext est false, afficher le résultat
 				if i == len(crew.Workflow.Steps)-1 || !step.OutputToNext {
 					fmt.Printf("Résultat de l'étape %d:\n%s\n\n", i, output)
 				}
 			}
-			
+
 			// Retourner le résultat de la dernière étape
 			lastIndex := len(crew.Workflow.Steps) - 1
 			if result, ok := outputs[lastIndex]; ok {
@@ -657,7 +657,7 @@ func executeCrewWithTimeout(ctx context.Context, crew *domain.Crew, instruction 
 			return
 		}
 	}()
-	
+
 	// Attendre le résultat ou le timeout
 	select {
 	case result := <-resultChan:
@@ -673,7 +673,7 @@ func executeCrewWithTimeout(ctx context.Context, crew *domain.Crew, instruction 
 func getCrewByID(crewID string) (*domain.Crew, error) {
 	basePath := filepath.Join(os.Getenv("HOME"), ".rlama", "agents")
 	crewPath := filepath.Join(basePath, crewID+".json")
-	
+
 	// Vérifier si l'ID est un nom plutôt qu'un ID
 	if !strings.HasPrefix(crewID, "crew_") {
 		// C'est un nom, chercher l'ID correspondant
@@ -682,22 +682,22 @@ func getCrewByID(crewID string) (*domain.Crew, error) {
 			return crew, nil
 		}
 	}
-	
+
 	// Essayer de charger directement par ID
 	if _, err := os.Stat(crewPath); err == nil {
 		data, err := ioutil.ReadFile(crewPath)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		crew := &domain.Crew{}
 		if err := json.Unmarshal(data, crew); err != nil {
 			return nil, err
 		}
-		
+
 		return crew, nil
 	}
-	
+
 	return nil, fmt.Errorf("crew non trouvé: %s", crewID)
 }
 
@@ -705,7 +705,7 @@ func getCrewByID(crewID string) (*domain.Crew, error) {
 func getAgentByID(agentID string) (*domain.Agent, error) {
 	basePath := filepath.Join(os.Getenv("HOME"), ".rlama", "agents")
 	agentPath := filepath.Join(basePath, agentID+".json")
-	
+
 	// Vérifier si l'ID est un nom plutôt qu'un ID
 	if !strings.HasPrefix(agentID, "agent_") {
 		// C'est un nom, chercher l'ID correspondant
@@ -714,22 +714,22 @@ func getAgentByID(agentID string) (*domain.Agent, error) {
 			return agent, nil
 		}
 	}
-	
+
 	// Essayer de charger directement par ID
 	if _, err := os.Stat(agentPath); err == nil {
 		data, err := ioutil.ReadFile(agentPath)
 		if err != nil {
 			return nil, err
 		}
-		
+
 		agent := &domain.Agent{}
 		if err := json.Unmarshal(data, agent); err != nil {
 			return nil, err
 		}
-		
+
 		return agent, nil
 	}
-	
+
 	return nil, fmt.Errorf("agent non trouvé: %s", agentID)
 }
 
@@ -740,7 +740,7 @@ func getAgentFilesFromDisk() ([]*domain.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	var agents []*domain.Agent
 	for _, file := range files {
 		if !file.IsDir() && strings.HasPrefix(file.Name(), "agent_") && strings.HasSuffix(file.Name(), ".json") {
@@ -748,14 +748,14 @@ func getAgentFilesFromDisk() ([]*domain.Agent, error) {
 			if err != nil {
 				continue // Skip files with errors
 			}
-			
+
 			agent := &domain.Agent{}
 			if json.Unmarshal(data, agent) == nil {
 				agents = append(agents, agent)
 			}
 		}
 	}
-	
+
 	return agents, nil
 }
 
@@ -774,7 +774,7 @@ func getCrewByName(crewName string) (*domain.Crew, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Chercher dans tous les fichiers crew
 	for _, file := range files {
 		if !file.IsDir() && strings.HasPrefix(file.Name(), "crew_") && strings.HasSuffix(file.Name(), ".json") {
@@ -782,18 +782,18 @@ func getCrewByName(crewName string) (*domain.Crew, error) {
 			if err != nil {
 				continue // Ignorer les fichiers avec erreurs
 			}
-			
+
 			crew := &domain.Crew{}
 			if err := json.Unmarshal(data, crew); err != nil {
 				continue // Ignorer les fichiers avec erreurs
 			}
-			
+
 			if crew.Name == crewName {
 				return crew, nil
 			}
 		}
 	}
-	
+
 	return nil, fmt.Errorf("crew non trouvé: %s", crewName)
 }
 
@@ -804,7 +804,7 @@ func getAgentByName(agentName string) (*domain.Agent, error) {
 	if err != nil {
 		return nil, err
 	}
-	
+
 	// Chercher dans tous les fichiers agent
 	for _, file := range files {
 		if !file.IsDir() && strings.HasPrefix(file.Name(), "agent_") && strings.HasSuffix(file.Name(), ".json") {
@@ -812,18 +812,18 @@ func getAgentByName(agentName string) (*domain.Agent, error) {
 			if err != nil {
 				continue // Ignorer les fichiers avec erreurs
 			}
-			
+
 			agent := &domain.Agent{}
 			if err := json.Unmarshal(data, agent); err != nil {
 				continue // Ignorer les fichiers avec erreurs
 			}
-			
+
 			if agent.Name == agentName {
 				return agent, nil
 			}
 		}
 	}
-	
+
 	return nil, fmt.Errorf("agent non trouvé: %s", agentName)
 }
 
@@ -839,13 +839,13 @@ func containsString(slice []string, s string) bool {
 
 func init() {
 	rootCmd.AddCommand(agentCmd)
-	
+
 	// Sous-commandes pour les agents
 	agentCmd.AddCommand(createAgentCmd)
 	agentCmd.AddCommand(listAgentsCmd)
 	agentCmd.AddCommand(deleteAgentCmd)
 	agentCmd.AddCommand(agentRunCmd)
-	
+
 	// Flags pour createAgentCmd
 	createAgentCmd.Flags().StringVar(&agentDescription, "description", "", "Description of the agent")
 	createAgentCmd.Flags().StringVar(&agentRole, "role", "", "Role of the agent (researcher, coder, analyst, etc.)")
@@ -853,28 +853,25 @@ func init() {
 	createAgentCmd.Flags().StringVar(&agentRagName, "rag", "", "RAG system to associate with the agent")
 	createAgentCmd.Flags().Bool("allow-commands", false, "Autoriser l'agent à exécuter des commandes système")
 	createAgentCmd.Flags().Bool("allow-files", false, "Autoriser l'agent à créer et modifier des fichiers")
-	
+
 	// Flags pour deleteAgentCmd
 	deleteAgentCmd.Flags().BoolVar(&forceDeleteAgent, "force", false, "Delete without asking for confirmation")
-	
+
 	// Gestion des crews
 	agentCmd.AddCommand(crewCmd)
-	
+
 	// Sous-commandes pour les crews
 	crewCmd.AddCommand(createCrewCmd)
 	crewCmd.AddCommand(agentCrewAddAgentCmd)
 	crewCmd.AddCommand(addWorkflowStepCmd)
 	crewCmd.AddCommand(runCrewCmd)
-	
+
 	// Flags pour createCrewCmd
 	createCrewCmd.Flags().String("workflow", "sequential", "Workflow type (sequential or parallel)")
 	createCrewCmd.Flags().String("description", "", "Description of the crew")
-	
+
 	// Flags pour addWorkflowStepCmd
 	addWorkflowStepCmd.Flags().String("instruction", "", "Instruction for this step")
 	addWorkflowStepCmd.Flags().String("depends-on", "", "Comma-separated list of step indices this step depends on")
 	addWorkflowStepCmd.Flags().Bool("output-to-next", false, "Whether this step's output should be passed to the next step")
-	
-	// Ajouter cette ligne dans la fonction init() après l'ajout des autres sous-commandes
-	crewCmd.AddCommand(wizardCmd)
-} 
+}
