@@ -29,12 +29,8 @@ type RagService interface {
 	SetupWebWatching(ragName string, websiteURL string, watchInterval int, options domain.WebWatchOptions) error
 	DisableWebWatching(ragName string) error
 	CheckWatchedWebsite(ragName string) (int, error)
-}
-
-// ChunkFilter defines filtering criteria for retrieving chunks
-type ChunkFilter struct {
-	DocumentSubstring string
-	ShowContent       bool
+	// Search recherche des chunks pertinents dans un RAG
+	Search(rag *domain.RagSystem, query string, limit int) ([]*domain.DocumentChunk, error)
 }
 
 // RagServiceImpl implements the RagService interface
@@ -44,12 +40,17 @@ type RagServiceImpl struct {
 	ragRepository    *repository.RagRepository
 	ollamaClient     *client.OllamaClient
 	rerankerService  *RerankerService
+	agentService     *AgentService
 }
 
 // NewRagService creates a new instance of RagService
-func NewRagService(ollamaClient *client.OllamaClient) RagService {
-	if ollamaClient == nil {
+func NewRagService(clientParam *client.OllamaClient) *RagServiceImpl {
+	var ollamaClient *client.OllamaClient
+
+	if clientParam == nil {
 		ollamaClient = client.NewDefaultOllamaClient()
+	} else {
+		ollamaClient = clientParam
 	}
 
 	return &RagServiceImpl{
@@ -58,6 +59,7 @@ func NewRagService(ollamaClient *client.OllamaClient) RagService {
 		ragRepository:    repository.NewRagRepository(),
 		ollamaClient:     ollamaClient,
 		rerankerService:  NewRerankerService(ollamaClient),
+		agentService:     NewAgentService(ollamaClient, nil),
 	}
 }
 
@@ -73,6 +75,7 @@ func NewRagServiceWithEmbedding(ollamaClient *client.OllamaClient, embeddingServ
 		ragRepository:    repository.NewRagRepository(),
 		ollamaClient:     ollamaClient,
 		rerankerService:  NewRerankerService(ollamaClient),
+		agentService:     NewAgentService(ollamaClient, nil),
 	}
 }
 
@@ -229,158 +232,41 @@ func (rs *RagServiceImpl) LoadRag(ragName string) (*domain.RagSystem, error) {
 
 // Query performs a query on a RAG system
 func (rs *RagServiceImpl) Query(rag *domain.RagSystem, query string, contextSize int) (string, error) {
-	// Check if Ollama is available
-	var llmClient client.LLMClient
+	// Get the appropriate LLM client based on the model
+	llmClient := client.GetLLMClient(rag.ModelName, rs.ollamaClient)
 
-	// Determine which client to use based on the model
-	if client.IsOpenAIModel(rag.ModelName) {
-		// For OpenAI, use the specified profile or default
-		openAIClient, err := client.NewOpenAIClientWithProfile(rag.APIProfileName)
-		if err != nil {
-			return "", err
-		}
-		llmClient = openAIClient
-	} else {
-		llmClient = rs.ollamaClient
-	}
-
-	if err := llmClient.CheckLLMAndModel(rag.ModelName); err != nil {
-		return "", err
-	}
-
-	// Generate embedding for the query
-	queryEmbedding, err := rs.embeddingService.GenerateQueryEmbedding(query, rag.ModelName)
+	// Rechercher les chunks pertinents
+	relevantChunks, err := rs.Search(rag, query, contextSize)
 	if err != nil {
-		return "", fmt.Errorf("error generating embedding for query: %w", err)
+		return "", fmt.Errorf("error searching for relevant chunks: %w", err)
 	}
 
-	// Use the provided context size or default value based on settings
-	rerankerOpts := DefaultRerankerOptions()
-
-	// Si contextSize est 0 (auto), utiliser:
-	// - RerankerTopK du RAG si défini
-	// - Sinon le TopK par défaut (5)
-	// - 20 si le reranking est désactivé
-	if contextSize <= 0 {
-		if rag.RerankerEnabled {
-			if rag.RerankerTopK > 0 {
-				contextSize = rag.RerankerTopK
-			} else {
-				contextSize = rerankerOpts.TopK // 5 par défaut
-			}
-			fmt.Printf("Using default context size of %d for reranked results\n", contextSize)
-		} else {
-			contextSize = 20 // 20 par défaut si le reranking est désactivé
-			fmt.Printf("Using context size of %d (reranking disabled)\n", contextSize)
-		}
+	if len(relevantChunks) == 0 {
+		return "Je n'ai pas trouvé d'information pertinente pour répondre à votre question.", nil
 	}
 
-	// First-stage retrieval: Get initial results using vector search
-	// Get more results than needed for reranking
-	initialRetrievalCount := contextSize
-	if rag.RerankerEnabled {
-		// If reranking is enabled, retrieve more documents initially (20 or 2*contextSize, whichever is larger)
-		initialRetrievalCount = rerankerOpts.InitialK
-		if initialRetrievalCount < contextSize {
-			initialRetrievalCount = contextSize * 2 // Ensure we get enough documents for reranking
-		}
-		fmt.Printf("Retrieving %d initial results for reranking...\n", initialRetrievalCount)
-	}
-
-	// Search for the most relevant chunks
-	results := rag.HybridStore.Search(queryEmbedding, initialRetrievalCount)
-
-	// Second-stage retrieval: Re-rank if enabled
-	var rankedResults []RankedResult
-	var includedDocs = make(map[string]bool)
-
-	if rag.RerankerEnabled {
-		// Set reranker options for adaptive content-based filtering
-		options := RerankerOptions{
-			// Don't limit by fixed TopK but use minimum threshold
-			TopK:              100, // Set to a high value to avoid arbitrary limit
-			InitialK:          initialRetrievalCount,
-			RerankerModel:     "BAAI/bge-reranker-v2-m3", // Always prefer BGE reranker
-			ScoreThreshold:    0.3,                       // Minimum relevance threshold
-			RerankerWeight:    rag.RerankerWeight,
-			AdaptiveFiltering: true, // Enable adaptive filtering
-		}
-
-		// If a specific BGE reranker model is defined in the RAG, use that one
-		// This allows users to choose between different BGE reranker models
-		if rag.RerankerModel != "" && strings.Contains(strings.ToLower(rag.RerankerModel), "bge-reranker") {
-			options.RerankerModel = rag.RerankerModel
-		}
-
-		// Display the effective model being used
-		fmt.Printf("Reranking and filtering results for relevance using model '%s'...\n", options.RerankerModel)
-
-		// Perform reranking with adaptive filtering
-		rerankedResults, err := rs.rerankerService.Rerank(query, rag, results, options)
-		if err != nil {
-			return "", fmt.Errorf("error during reranking: %w", err)
-		}
-
-		rankedResults = rerankedResults
-
-		// Track documents included after adaptive filtering
-		for _, result := range rankedResults {
-			includedDocs[result.Chunk.DocumentID] = true
-		}
-
-		// Show information about filtered results
-		fmt.Printf("Selected %d relevant chunks from %d initial results\n",
-			len(rankedResults), len(results))
-	}
-
-	// Build the context
+	// Construire le contexte à partir des chunks
 	var context strings.Builder
-	context.WriteString("Relevant information:\n\n")
-
-	// Use the reranked results if available, otherwise use the initial results
-	if rag.RerankerEnabled && len(rankedResults) > 0 {
-		for _, result := range rankedResults {
-			chunk := result.Chunk
-			// Add chunk content with its metadata
-			context.WriteString(fmt.Sprintf("--- %s (Score: %.4f) ---\n%s\n\n",
-				chunk.GetMetadataString(), result.FinalScore, chunk.Content))
-		}
-	} else {
-		// Use original vector search results if reranking is disabled or failed
-		for _, result := range results {
-			chunk := rag.GetChunkByID(result.ID)
-			if chunk != nil {
-				// Add chunk content with its metadata
-				context.WriteString(fmt.Sprintf("--- %s ---\n%s\n\n",
-					chunk.GetMetadataString(), chunk.Content))
-
-				includedDocs[chunk.DocumentID] = true
-			}
-		}
+	for _, chunk := range relevantChunks {
+		context.WriteString(chunk.Content)
+		context.WriteString("\n\n")
 	}
 
-	// Build the prompt with better formatting and instructions for citing sources
-	systemMessage := "You are a helpful assistant that provides accurate information based on the documents you've been given. Answer the question based on the context provided. If you don't know the answer based on the context, say that you don't know rather than making up an answer. Important: Always respond in the same language as the user's query."
-	prompt := fmt.Sprintf(`System: %s
+	// Construire le prompt
+	prompt := fmt.Sprintf(`En tant qu'assistant, utilisez le contexte suivant pour répondre à la question. 
+Si vous ne trouvez pas la réponse dans le contexte, dites-le honnêtement.
 
-Context:
+Contexte:
 %s
 
 Question: %s
 
-Answer based on the provided information. If the information doesn't contain the answer, say so clearly.
-Include references to the source documents in your answer using the format (Source: document name).`,
-		systemMessage, context.String(), query)
+Réponse:`, context.String(), query)
 
-	// Show search results to the user
-	fmt.Println()
-	fmt.Printf("Found %d relevant sections across %d documents\n",
-		len(includedDocs), len(includedDocs))
-
-	// Generate the response with the appropriate client
+	// Générer la réponse
 	response, err := llmClient.GenerateCompletion(rag.ModelName, prompt)
 	if err != nil {
-		return "", fmt.Errorf("error generating response: %w", err)
+		return "", fmt.Errorf("error generating completion: %w", err)
 	}
 
 	return response, nil
@@ -591,4 +477,13 @@ func (rs *RagServiceImpl) UpdateRerankerModel(ragName string, model string) erro
 
 	fmt.Printf("Reranker model updated to '%s' for RAG '%s'.\n", model, rag.Name)
 	return nil
+}
+
+// Search recherche des chunks pertinents dans un RAG
+func (rs *RagServiceImpl) Search(rag *domain.RagSystem, query string, limit int) ([]*domain.DocumentChunk, error) {
+	return rs.GetRagChunks(rag.Name, ChunkFilter{
+		Query:       query,
+		Limit:       limit,
+		ShowContent: true,
+	})
 }

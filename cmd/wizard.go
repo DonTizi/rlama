@@ -7,11 +7,10 @@ import (
 	"io"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 
-	"github.com/AlecAivazis/survey/v2"
 	"github.com/dontizi/rlama/internal/crawler"
-	"github.com/dontizi/rlama/internal/domain"
 	"github.com/dontizi/rlama/internal/service"
 	"github.com/spf13/cobra"
 )
@@ -36,13 +35,10 @@ var (
 	localWizardProcessExts  []string
 )
 
-// Renamed to avoid conflict with snowflake_wizard.go
-
 var localWizardCmd = &cobra.Command{
 	Use:   "wizard",
-	Short: "Interactive wizard to create a local RAG",
-	Long: `Start an interactive wizard that guides you through creating a RAG system.
-This makes it easy to set up a new RAG without remembering all command options.`,
+	Short: "Local RAG creation wizard",
+	Long:  `Interactive wizard to create and configure a local RAG system.`,
 	RunE: func(cmd *cobra.Command, args []string) error {
 		fmt.Print("\n🧙 Welcome to the RLAMA Local RAG Wizard! 🧙\n\n")
 
@@ -86,12 +82,7 @@ This makes it easy to set up a new RAG without remembering all command options.`
 		// Execute the command
 		err := ollamaCmd.Run()
 		if err != nil {
-			fmt.Println("❌ Failed to list Ollama models.")
-			if stderr.Len() > 0 {
-				fmt.Printf("Error details: %s\n", stderr.String())
-			}
-			fmt.Println("Make sure Ollama is installed and running.")
-			fmt.Println("Continuing without model list. You'll need to enter a model name manually.")
+			return err
 		}
 
 		// Parse the output of ollama list (text format)
@@ -214,224 +205,104 @@ This makes it easy to set up a new RAG without remembering all command options.`
 				}
 			}
 
-			// Ask if the user wants to use the sitemap
-			useSitemapPrompt := &survey.Confirm{
-				Message: "Use sitemap.xml if available (recommended for better coverage)?",
-				Default: true,
-			}
-			err = survey.AskOne(useSitemapPrompt, &useSitemap)
-			if err != nil {
-				return err
-			}
-		} else {
-			// Option local folder (existing code)
-			useWebCrawler = false
+			// Ask about sitemap
+			fmt.Print("Use sitemap.xml if available? (y/N): ")
+			sitemapStr, _ := reader.ReadString('\n')
+			sitemapStr = strings.ToLower(strings.TrimSpace(sitemapStr))
+			useSitemap = sitemapStr == "y" || sitemapStr == "yes"
 
-			fmt.Print("\nEnter path to document folder: ")
+		} else {
+			// Local folder option
+			fmt.Print("\nEnter the path to your documents folder: ")
 			folderPath, _ = reader.ReadString('\n')
 			folderPath = strings.TrimSpace(folderPath)
 			if folderPath == "" {
 				return fmt.Errorf("folder path cannot be empty")
 			}
+
+			// Validate folder exists
+			if _, err := os.Stat(folderPath); os.IsNotExist(err) {
+				return fmt.Errorf("folder does not exist: %s", folderPath)
+			}
 		}
 
-		// Step 4: Chunking options
-		fmt.Println("\nStep 4: Chunking options")
-
-		// Add chunking strategy selection
-		fmt.Println("\nChunking strategies:")
-		fmt.Println("  auto     - Automatically selects the best strategy for each document")
-		fmt.Println("  fixed    - Splits text into fixed-size chunks")
-		fmt.Println("  semantic - Respects natural boundaries like paragraphs")
-		fmt.Println("  hybrid   - Adapts strategy based on document type")
-		fmt.Println("  hierarchical - Creates two-level structure for long documents")
-
-		fmt.Print("Chunking strategy [auto]: ")
-		chunkingStrategyStr, _ := reader.ReadString('\n')
-		chunkingStrategyStr = strings.TrimSpace(chunkingStrategyStr)
-		chunkingStrategy := "auto"
-		if chunkingStrategyStr != "" {
-			chunkingStrategy = chunkingStrategyStr
-		}
-
-		fmt.Print("Chunk size [1000]: ")
+		// Step 4: Configure chunking
+		fmt.Println("\nStep 4: Configure text chunking")
+		fmt.Print("Chunk size (tokens) [512]: ")
 		chunkSizeStr, _ := reader.ReadString('\n')
 		chunkSizeStr = strings.TrimSpace(chunkSizeStr)
-		chunkSize := 1000
+		chunkSize := 512 // default value
 		if chunkSizeStr != "" {
 			fmt.Sscanf(chunkSizeStr, "%d", &chunkSize)
 		}
 
-		fmt.Print("Chunk overlap [200]: ")
+		fmt.Print("Chunk overlap (tokens) [50]: ")
 		overlapStr, _ := reader.ReadString('\n')
 		overlapStr = strings.TrimSpace(overlapStr)
-		overlap := 200
+		overlap := 50 // default value
 		if overlapStr != "" {
 			fmt.Sscanf(overlapStr, "%d", &overlap)
 		}
 
-		// Step 5: File filtering (optional)
-		fmt.Println("\nStep 5: File filtering (optional)")
-
-		fmt.Print("Exclude directories (comma-separated): ")
-		excludeDirsStr, _ := reader.ReadString('\n')
-		excludeDirsStr = strings.TrimSpace(excludeDirsStr)
-		var excludeDirs []string
-		if excludeDirsStr != "" {
-			excludeDirs = strings.Split(excludeDirsStr, ",")
-			for i := range excludeDirs {
-				excludeDirs[i] = strings.TrimSpace(excludeDirs[i])
-			}
+		// Create the RAG system
+		fmt.Println("\nCreating RAG system...")
+		options := service.DocumentLoaderOptions{
+			ChunkSize:    chunkSize,
+			ChunkOverlap: overlap,
+			ExcludeDirs:  excludePaths,
 		}
 
-		fmt.Print("Exclude extensions (comma-separated): ")
-		excludeExtsStr, _ := reader.ReadString('\n')
-		excludeExtsStr = strings.TrimSpace(excludeExtsStr)
-		var excludeExts []string
-		if excludeExtsStr != "" {
-			excludeExts = strings.Split(excludeExtsStr, ",")
-			for i := range excludeExts {
-				excludeExts[i] = strings.TrimSpace(excludeExts[i])
-			}
-		}
-
-		fmt.Print("Process only these extensions (comma-separated): ")
-		processExtsStr, _ := reader.ReadString('\n')
-		processExtsStr = strings.TrimSpace(processExtsStr)
-		var processExts []string
-		if processExtsStr != "" {
-			processExts = strings.Split(processExtsStr, ",")
-			for i := range processExts {
-				processExts[i] = strings.TrimSpace(processExts[i])
-			}
-		}
-
-		// Step 6: Confirmation and creation
-		fmt.Println("\nStep 6: Review and create")
-		fmt.Println("RAG configuration:")
-		fmt.Printf("- Name: %s\n", ragName)
-		fmt.Printf("- Model: %s\n", modelName)
-
-		if useWebCrawler {
-			fmt.Printf("- Source: Website - %s\n", websiteURL)
-			fmt.Printf("- Crawl depth: %d\n", maxDepth)
-			fmt.Printf("- Concurrency: %d\n", concurrency)
-			if len(excludePaths) > 0 {
-				fmt.Printf("- Exclude paths: %s\n", strings.Join(excludePaths, ", "))
-			}
-		} else {
-			fmt.Printf("- Source: Local folder - %s\n", folderPath)
-			if len(excludeDirs) > 0 {
-				fmt.Printf("- Exclude directories: %s\n", strings.Join(excludeDirs, ", "))
-			}
-			if len(excludeExts) > 0 {
-				fmt.Printf("- Exclude extensions: %s\n", strings.Join(excludeExts, ", "))
-			}
-			if len(processExts) > 0 {
-				fmt.Printf("- Process only: %s\n", strings.Join(processExts, ", "))
-			}
-		}
-
-		fmt.Printf("- Chunk size: %d\n", chunkSize)
-		fmt.Printf("- Chunk overlap: %d\n", overlap)
-		fmt.Printf("- Chunking strategy: %s\n", chunkingStrategy)
-
-		fmt.Print("\nCreate RAG with these settings? (y/n): ")
-		confirm, _ := reader.ReadString('\n')
-		confirm = strings.ToLower(strings.TrimSpace(confirm))
-
-		if confirm != "y" && confirm != "yes" {
-			fmt.Println("RAG creation cancelled.")
-			return nil
-		}
-
-		// Create the RAG
-		fmt.Println("\nCreating RAG...")
-
-		// Get the configured Ollama client
+		// Create the RAG service
 		ollamaClient := GetOllamaClient()
-
-		// Check that the model is available before continuing
-		// This step is important to avoid errors later
-		fmt.Printf("Checking if model '%s' is available...\n", modelName)
-		err = ollamaClient.CheckOllamaAndModel(modelName)
-		if err != nil {
-			return fmt.Errorf("model '%s' is not available: %w", modelName, err)
-		}
-
-		// Use RagService to create the RAG
 		ragService := service.NewRagService(ollamaClient)
 
+		// Create the RAG system
 		if useWebCrawler {
-			// Use the crawler
-			fmt.Printf("\nCrawling website '%s'...\n", websiteURL)
-
-			// Create the crawler
-			webCrawler, err := crawler.NewWebCrawler(websiteURL, maxDepth, concurrency, excludePaths)
+			// Create a web crawler
+			crawler, err := crawler.NewWebCrawler(websiteURL, maxDepth, concurrency, excludePaths)
 			if err != nil {
-				return fmt.Errorf("error initializing web crawler: %w", err)
+				return fmt.Errorf("error creating web crawler: %w", err)
 			}
+			crawler.SetUseSitemap(useSitemap)
 
-			// Set the sitemap option
-			webCrawler.SetUseSitemap(useSitemap)
-
-			// Start the crawling
-			documents, err := webCrawler.CrawlWebsite()
+			// Crawl the website and get documents
+			docs, err := crawler.CrawlWebsite()
 			if err != nil {
 				return fmt.Errorf("error crawling website: %w", err)
 			}
 
-			if len(documents) == 0 {
-				return fmt.Errorf("no content found when crawling %s", websiteURL)
-			}
-
-			fmt.Printf("Retrieved %d pages from website. Processing content...\n", len(documents))
-
-			// Convert documents to pointers before calling createTempDirForDocuments
-			var docPointers []*domain.Document
-			for i := range documents {
-				docPointers = append(docPointers, &documents[i])
-			}
-
-			// Create a temporary directory for the documents
-			tempDir := createTempDirForDocuments(docPointers)
-			if tempDir != "" {
-				defer cleanupTempDir(tempDir)
-			}
-
-			// Options for the document loader
-			loaderOptions := service.DocumentLoaderOptions{
-				ChunkSize:        chunkSize,
-				ChunkOverlap:     overlap,
-				ChunkingStrategy: chunkingStrategy,
-				EnableReranker:   true,
-			}
-
-			// Create the RAG
-			err = ragService.CreateRagWithOptions(modelName, ragName, tempDir, loaderOptions)
+			// Create a temporary directory for the crawled documents
+			tempDir, err := os.MkdirTemp("", "rlama-web-*")
 			if err != nil {
-				return err
+				return fmt.Errorf("error creating temporary directory: %w", err)
+			}
+			defer os.RemoveAll(tempDir)
+
+			// Save the crawled documents to the temporary directory
+			for i, doc := range docs {
+				filePath := filepath.Join(tempDir, fmt.Sprintf("page_%d.md", i))
+				err = os.WriteFile(filePath, []byte(doc.Content), 0644)
+				if err != nil {
+					return fmt.Errorf("error saving document: %w", err)
+				}
+			}
+
+			// Create the RAG system with the crawled documents
+			err = ragService.CreateRagWithOptions(modelName, ragName, tempDir, options)
+			if err != nil {
+				return fmt.Errorf("error creating RAG system: %w", err)
 			}
 		} else {
-			// Use the local folder (existing code)
-			loaderOptions := service.DocumentLoaderOptions{
-				ExcludeDirs:      excludeDirs,
-				ExcludeExts:      excludeExts,
-				ProcessExts:      processExts,
-				ChunkSize:        chunkSize,
-				ChunkOverlap:     overlap,
-				ChunkingStrategy: chunkingStrategy,
-				EnableReranker:   true,
-			}
-
-			err = ragService.CreateRagWithOptions(modelName, ragName, folderPath, loaderOptions)
+			// Create the RAG system with local documents
+			err = ragService.CreateRagWithOptions(modelName, ragName, folderPath, options)
 			if err != nil {
-				return err
+				return fmt.Errorf("error creating RAG system: %w", err)
 			}
 		}
 
-		fmt.Println("\n🎉 RAG created successfully! 🎉")
-		fmt.Printf("\nYou can now use your RAG with: rlama run %s\n", ragName)
+		fmt.Printf("\n✨ RAG system '%s' has been created successfully! ✨\n", ragName)
+		fmt.Println("\nYou can now use it with the following command:")
+		fmt.Printf("  rlama run %s\n\n", ragName)
 
 		return nil
 	},
@@ -439,13 +310,20 @@ This makes it easy to set up a new RAG without remembering all command options.`
 
 func init() {
 	rootCmd.AddCommand(localWizardCmd)
+
+	// Add flags for the local wizard
+	localWizardCmd.Flags().StringVar(&localWizardModel, "model", "", "Model to use")
+	localWizardCmd.Flags().StringVar(&localWizardName, "name", "", "Name of the RAG system")
+	localWizardCmd.Flags().StringVar(&localWizardPath, "path", "", "Path to the documents folder")
+	localWizardCmd.Flags().IntVar(&localWizardChunkSize, "chunk-size", 512, "Size of text chunks in tokens")
+	localWizardCmd.Flags().IntVar(&localWizardChunkOverlap, "chunk-overlap", 50, "Overlap between chunks in tokens")
+	localWizardCmd.Flags().StringSliceVar(&localWizardExcludeDirs, "exclude-dirs", []string{}, "Directories to exclude")
+	localWizardCmd.Flags().StringSliceVar(&localWizardExcludeExts, "exclude-exts", []string{}, "File extensions to exclude")
+	localWizardCmd.Flags().StringSliceVar(&localWizardProcessExts, "process-exts", []string{}, "File extensions to process")
 }
 
 func ExecuteWizard(out, errOut io.Writer) error {
-	cmd := NewWizardCommand()
-	cmd.SetOut(out)
-	cmd.SetErr(errOut)
-	return cmd.Execute()
+	return localWizardCmd.Execute()
 }
 
 func NewWizardCommand() *cobra.Command {

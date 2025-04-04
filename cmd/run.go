@@ -167,7 +167,7 @@ func checkWatchedResources(rag *domain.RagSystem, ragService service.RagService)
 
 	// Check watched website if enabled with on-use check
 	if rag.WebWatchEnabled && rag.WebWatchInterval == 0 {
-		webWatcher := service.NewWebWatcher(ragService)
+		webWatcher := service.NewWebWatcherWithoutAgent(ragService)
 		pagesAdded, err := webWatcher.CheckAndUpdateRag(rag)
 		if err != nil {
 			fmt.Printf("Error checking watched website: %v\n", err)

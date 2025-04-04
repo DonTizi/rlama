@@ -28,14 +28,20 @@ type RagSystem struct {
 	WebWatchInterval int             `json:"web_watch_interval,omitempty"` // In minutes
 	LastWebWatchAt   time.Time       `json:"last_web_watched_at,omitempty"`
 	WebWatchOptions  WebWatchOptions `json:"web_watch_options,omitempty"`
-	APIProfileName   string          `json:"api_profile_name,omitempty"`  // Name of the API profile to use
-	ChunkingStrategy string          `json:"chunking_strategy,omitempty"` // Type of chunking strategy used
+	// API and chunking settings
+	APIProfileName   string `json:"api_profile_name,omitempty"`  // Name of the API profile to use
+	ChunkingStrategy string `json:"chunking_strategy,omitempty"` // Type of chunking strategy used
 	// Reranking settings
 	RerankerEnabled   bool    `json:"reranker_enabled,omitempty"`   // Whether to use reranking
 	RerankerModel     string  `json:"reranker_model,omitempty"`     // Model to use for reranking (if different from ModelName)
 	RerankerWeight    float64 `json:"reranker_weight,omitempty"`    // Weight for reranker scores vs vector scores (0-1)
 	RerankerThreshold float64 `json:"reranker_threshold,omitempty"` // Minimum score threshold for reranked results
 	RerankerTopK      int     `json:"reranker_top_k,omitempty"`     // Default: return only top 5 results after reranking
+	// Agent integration settings
+	LinkedAgentID   string `json:"linked_agent_id,omitempty"`  // ID de l'agent lié
+	LinkedCrewID    string `json:"linked_crew_id,omitempty"`   // ID du crew lié
+	LinkedPrompt    string `json:"linked_prompt,omitempty"`    // Instruction à envoyer lors d'un changement
+	OutputDirectory string `json:"output_directory,omitempty"` // Dossier de sortie des résultats
 }
 
 // DocumentWatchOptions stores settings for directory watching

@@ -793,6 +793,16 @@ func (dl *DocumentLoader) extractContent(path string) (string, error) {
 	}
 }
 
+// ChunkFilter defines filtering criteria for retrieving document chunks
+type ChunkFilter struct {
+	Query      string
+	Limit      int
+	DocumentID string
+	// Adding the missing fields
+	DocumentSubstring string
+	ShowContent       bool
+}
+
 // CreateRagWithOptions creates a new RAG with the specified options
 func (dl *DocumentLoader) CreateRagWithOptions(options DocumentLoaderOptions) (*domain.RagSystem, error) {
 	documents, err := dl.LoadDocumentsFromFolderWithOptions("", options)

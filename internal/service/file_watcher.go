@@ -5,6 +5,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+	"io/ioutil"
+	"encoding/json"
 
 	"github.com/dontizi/rlama/internal/domain"
 )
@@ -200,4 +202,84 @@ func (fw *FileWatcher) checkAllRags() {
 			}
 		}
 	}
+}
+
+// GetLinkedCrews retrieves the crews linked to a specific RAG
+func (fw *FileWatcher) GetLinkedCrews(ragName string) ([]LinkedCrew, error) {
+	// Charger le RAG pour vérifier s'il a des crews liés
+	rag, err := fw.ragService.LoadRag(ragName)
+	if err != nil {
+		return nil, fmt.Errorf("erreur lors du chargement du RAG: %w", err)
+	}
+	
+	// Vérifier si le RAG a un crew lié
+	if rag.LinkedCrewID == "" {
+		return nil, nil // Pas de crews liés
+	}
+	
+	fmt.Printf("Recherche du crew avec ID: %s\n", rag.LinkedCrewID)
+	
+	// Chercher d'abord le fichier par ID du crew
+	basePath := filepath.Join(os.Getenv("HOME"), ".rlama", "agents")
+	
+	// Méthode 1: Chercher dans le dossier agents par ID
+	crewFilePath := filepath.Join(basePath, rag.LinkedCrewID)
+	
+	if _, err := os.Stat(crewFilePath); os.IsNotExist(err) {
+		// Méthode 2: Essayer avec extension .json
+		crewFilePath = filepath.Join(basePath, rag.LinkedCrewID+".json")
+		
+		if _, err := os.Stat(crewFilePath); os.IsNotExist(err) {
+			// Méthode 3: Chercher dans le sous-dossier crews par ID
+			crewFilePath = filepath.Join(basePath, "crews", rag.LinkedCrewID)
+			
+			if _, err := os.Stat(crewFilePath); os.IsNotExist(err) {
+				// Méthode 4: Essayer avec extension .json dans le sous-dossier
+				crewFilePath = filepath.Join(basePath, "crews", rag.LinkedCrewID+".json")
+				
+				if _, err := os.Stat(crewFilePath); os.IsNotExist(err) {
+					// Dernière tentative: parcourir le dossier pour trouver le fichier
+					fmt.Printf("Tentative de recherche manuelle des fichiers crew...\n")
+					files, _ := ioutil.ReadDir(basePath)
+					
+					fmt.Printf("Fichiers trouvés dans %s:\n", basePath)
+					for _, file := range files {
+						fmt.Printf("- %s\n", file.Name())
+					}
+					
+					return nil, nil // Le fichier n'existe pas
+				}
+			}
+		}
+	}
+	
+	fmt.Printf("Fichier crew trouvé: %s\n", crewFilePath)
+	
+	// Lire le fichier crew
+	data, err := ioutil.ReadFile(crewFilePath)
+	if err != nil {
+		return nil, fmt.Errorf("erreur lors de la lecture du fichier crew: %w", err)
+	}
+	
+	// Désérialiser le crew
+	crew := &domain.Crew{}
+	if err := json.Unmarshal(data, crew); err != nil {
+		return nil, fmt.Errorf("erreur lors de la désérialisation du crew: %w", err)
+	}
+	
+	fmt.Printf("Crew '%s' trouvé avec ID: %s\n", crew.Name, crew.ID)
+	
+	// Créer la structure LinkedCrew
+	return []LinkedCrew{
+		{
+			CrewID:             crew.ID,
+			InstructionTemplate: rag.LinkedPrompt, // Utiliser le prompt stocké dans le RAG
+		},
+	}, nil
+}
+
+// LinkedCrew represents a crew linked to a RAG
+type LinkedCrew struct {
+	CrewID             string
+	InstructionTemplate string
 } 

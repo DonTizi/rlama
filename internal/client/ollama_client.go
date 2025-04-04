@@ -2,6 +2,7 @@ package client
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
@@ -34,6 +35,31 @@ type EmbeddingResponse struct {
 	Embedding []float32 `json:"embedding"`
 }
 
+// GenerateOptions représente les options pour une requête de génération à Ollama
+type GenerateOptions struct {
+	Model       string      `json:"model"`
+	Prompt      string      `json:"prompt"`
+	System      string      `json:"system,omitempty"`
+	Template    string      `json:"template,omitempty"`
+	Context     []int       `json:"context,omitempty"`
+	Format      string      `json:"format,omitempty"`
+	Stream      bool        `json:"stream,omitempty"`
+	Raw         bool        `json:"raw,omitempty"`
+	Options     interface{} `json:"options,omitempty"`
+	Temperature float64     `json:"temperature,omitempty"`
+	TopP        float64     `json:"top_p,omitempty"`
+	TopK        int         `json:"top_k,omitempty"`
+	MaxTokens   int         `json:"num_predict,omitempty"`
+	Tools       []Tool      `json:"tools,omitempty"`
+}
+
+// Tool représente un outil pouvant être utilisé par le LLM
+type Tool struct {
+	Name        string                       `json:"name"`
+	Description string                       `json:"description"`
+	Function    func(string) (string, error) `json:"-"`
+}
+
 // GenerationRequest is the structure of the request for the /api/generate API
 type GenerationRequest struct {
 	Model    string  `json:"model"`
@@ -57,9 +83,18 @@ type Options struct {
 type GenerationResponse struct {
 	Model     string `json:"model"`
 	Response  string `json:"response"`
-	Context   []int  `json:"context"`
 	CreatedAt string `json:"created_at"`
 	Done      bool   `json:"done"`
+	Context   []int  `json:"context,omitempty"`
+}
+
+// ModelInfo represents information about an Ollama model
+type ModelInfo struct {
+	Name        string `json:"name"`
+	Size        int64  `json:"size"`
+	ModifiedAt  string `json:"modified_at"`
+	Digest      string `json:"digest"`
+	Description string `json:"description"`
 }
 
 // NewOllamaClient creates a new Ollama client
@@ -126,9 +161,25 @@ func NewOllamaClient(host, port string) *OllamaClient {
 }
 
 // NewDefaultOllamaClient creates a new Ollama client with the default values
-// Kept for compatibility with existing code
 func NewDefaultOllamaClient() *OllamaClient {
-	return NewOllamaClient(DefaultOllamaHost, DefaultOllamaPort)
+	host := DefaultOllamaHost
+	port := DefaultOllamaPort
+
+	// Check for OLLAMA_HOST environment variable
+	if envHost := os.Getenv("OLLAMA_HOST"); envHost != "" {
+		// If it contains a port, extract it
+		if strings.Contains(envHost, ":") {
+			parts := strings.Split(envHost, ":")
+			host = parts[0]
+			if len(parts) > 1 {
+				port = parts[1]
+			}
+		} else {
+			host = envHost
+		}
+	}
+
+	return NewOllamaClient(host, port)
 }
 
 // GenerateEmbedding generates an embedding for the given text
@@ -166,20 +217,60 @@ func (c *OllamaClient) GenerateEmbedding(model, text string) ([]float32, error) 
 	return embeddingResp.Embedding, nil
 }
 
-// GenerateCompletion generates a response for the given prompt
+// GenerateCompletion implements the LLMClient interface
 func (c *OllamaClient) GenerateCompletion(model, prompt string) (string, error) {
-	reqBody := GenerationRequest{
-		Model:  model,
-		Prompt: prompt,
-		Stream: false,
-		Options: Options{
-			Temperature: 0.7,
-			TopP:        0.9,
-			NumPredict:  1024,
+	messages := []map[string]string{
+		{
+			"role":    "system",
+			"content": "You are a helpful assistant that answers questions based on the provided context.",
 		},
+		{
+			"role":    "user",
+			"content": prompt,
+		},
+	}
+	return c.GenerateCompletionWithMessages(model, messages)
+}
+
+// GenerateCompletionWithMessages génère une réponse basée sur un historique de messages
+func (c *OllamaClient) GenerateCompletionWithMessages(model string, messages []map[string]string) (string, error) {
+	reqBody := map[string]interface{}{
+		"model":    model,
+		"messages": messages,
+		"stream":   false,
 	}
 
 	reqJSON, err := json.Marshal(reqBody)
+	if err != nil {
+		return "", err
+	}
+
+	resp, err := c.Client.Post(
+		fmt.Sprintf("%s/api/chat", c.BaseURL),
+		"application/json",
+		bytes.NewBuffer(reqJSON),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("failed to generate completion: %s (status: %d)", string(bodyBytes), resp.StatusCode)
+	}
+
+	var genResp GenerationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {
+		return "", err
+	}
+
+	return genResp.Response, nil
+}
+
+// GenerateWithOptions génère une réponse avec des options personnalisées
+func (c *OllamaClient) GenerateWithOptions(options GenerateOptions) (string, error) {
+	reqJSON, err := json.Marshal(options)
 	if err != nil {
 		return "", err
 	}
@@ -196,7 +287,41 @@ func (c *OllamaClient) GenerateCompletion(model, prompt string) (string, error) 
 
 	if resp.StatusCode != http.StatusOK {
 		bodyBytes, _ := ioutil.ReadAll(resp.Body)
-		return "", fmt.Errorf("failed to generate completion: %s (status: %d)", string(bodyBytes), resp.StatusCode)
+		return "", fmt.Errorf("failed to generate with options: %s (status: %d)", string(bodyBytes), resp.StatusCode)
+	}
+
+	var genResp GenerationResponse
+	if err := json.NewDecoder(resp.Body).Decode(&genResp); err != nil {
+		return "", err
+	}
+
+	return genResp.Response, nil
+}
+
+// GenerateWithTimeout génère une réponse avec un contexte et des options personnalisées
+func (c *OllamaClient) GenerateWithTimeout(ctx context.Context, options GenerateOptions) (string, error) {
+	reqJSON, err := json.Marshal(options)
+	if err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequestWithContext(ctx, "POST",
+		fmt.Sprintf("%s/api/generate", c.BaseURL),
+		bytes.NewBuffer(reqJSON))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := c.Client.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		return "", fmt.Errorf("failed to generate with options: %s (status: %d)", string(bodyBytes), resp.StatusCode)
 	}
 
 	var genResp GenerationResponse
@@ -244,14 +369,14 @@ func (c *OllamaClient) CheckOllamaAndModel(modelName string) error {
 	return nil
 }
 
-// RunHuggingFaceModel prepares a Hugging Face model for use with Ollama
-func (c *OllamaClient) RunHuggingFaceModel(hfModelPath string, quantization string) error {
-	modelRef := "hf.co/" + hfModelPath
-	if quantization != "" {
-		modelRef += ":" + quantization
+// RunHuggingFaceModel exécute un modèle Hugging Face en mode interactif
+func (c *OllamaClient) RunHuggingFaceModel(modelPath string, quantization string) error {
+	// Si quantization n'est pas spécifiée dans les arguments mais dans le chemin du modèle
+	if quantization == "" {
+		quantization = GetQuantizationFromModelRef(modelPath)
 	}
 
-	cmd := exec.Command("ollama", "run", modelRef)
+	cmd := exec.Command("ollama", "run", modelPath)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
@@ -303,4 +428,27 @@ func GetQuantizationFromModelRef(modelRef string) string {
 		return modelRef[colonIdx+1:]
 	}
 	return ""
+}
+
+// ListModels lists all available models
+func (c *OllamaClient) ListModels() ([]ModelInfo, error) {
+	resp, err := c.Client.Get(fmt.Sprintf("%s/api/tags", c.BaseURL))
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		bodyBytes, _ := ioutil.ReadAll(resp.Body)
+		return nil, fmt.Errorf("failed to list models: %s (status: %d)", string(bodyBytes), resp.StatusCode)
+	}
+
+	var result struct {
+		Models []ModelInfo `json:"models"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+
+	return result.Models, nil
 }
