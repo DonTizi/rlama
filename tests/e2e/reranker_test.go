@@ -29,7 +29,7 @@ func TestRerankerTopKLimit(t *testing.T) {
 	// Créer des documents de test
 	createRerankerTestDocuments(t, tempDir, 30) // 30 documents pour avoir suffisamment de chunks à reranker
 
-	// Nettoyer tout RAG existant avec le nom de test
+	// Nettoyer tout RAG existent avec le nom de test
 	repository.NewRagRepository().Delete("reranker-test-rag")
 
 	t.Run("DefaultTopKLimit", func(t *testing.T) {
