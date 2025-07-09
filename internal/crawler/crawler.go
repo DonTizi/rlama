@@ -203,7 +203,15 @@ func (wc *WebCrawler) crawlStandard() ([]domain.Document, error) {
 		}
 
 		// Don't crawl deeper if we've reached the maximum depth
-		urlDepth := strings.Count(url[len(wc.baseURL.String()):], "/")
+		urlStr := url
+		baseURLStr := wc.baseURL.String()
+
+		// Prevent panic when url length is less than baseURL length
+		urlDepth := 0
+		if len(urlStr) > len(baseURLStr) {
+			urlDepth = strings.Count(urlStr[len(baseURLStr):], "/")
+		}
+
 		if urlDepth >= wc.maxDepth {
 			continue
 		}
