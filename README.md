@@ -14,6 +14,10 @@
 <br>
 
 # RLAMA - User Guide
+
+> **⚠️ Project Temporarily Paused**  
+> This project is currently on pause due to my work and university commitments that take up a lot of my time. I am not able to actively maintain this project at the moment. Development will resume when my situation allows it.
+
 RLAMA is a powerful AI-driven question-answering tool for your documents, seamlessly integrating with your local Ollama models. It enables you to create, manage, and interact with Retrieval-Augmented Generation (RAG) systems tailored to your documentation needs.
 
 
